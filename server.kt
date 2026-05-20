@@ -10,15 +10,16 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 
-enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR }
+enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART }
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
-data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0)
+data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var hasAnswered: Boolean = false)
 
 class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession) {
     val players = mutableListOf<Player>()
     var questions: List<Map<String, Any>> = emptyList()
     var currentQuestionIndex = 0
     var timerSeconds = 20
+    var waitingForAnswers = false
     
     suspend fun broadcast(message: GameMessage) {
         val text = Gson().toJson(message)
@@ -71,21 +72,27 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (room != null && msg.content != null) {
                 val setupType = object : TypeToken<Map<String, Any>>() {}.type
                 val setup: Map<String, Any> = gson.fromJson(msg.content, setupType)
-                
                 room.questions = setup["questions"] as List<Map<String, Any>>
                 room.timerSeconds = (setup["timer"] as Double).toInt()
                 room.currentQuestionIndex = 0
-                
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
-                
-                CoroutineScope(Dispatchers.Default).launch {
-                    delay(3000)
-                    runGameLoop(room)
-                }
+                CoroutineScope(Dispatchers.Default).launch { delay(3000); runGameLoop(room) }
             }
         }
         MessageType.ANSWER -> {
-            // Logic for scoring can be added here
+            val room = rooms.values.find { r -> r.players.any { it.session == session } }
+            val player = room?.players?.find { it.session == session }
+            if (room != null && room.waitingForAnswers && player != null && !player.hasAnswered) {
+                player.hasAnswered = true
+                // Αν απάντησαν όλοι, σταματάμε την αναμονή
+                if (room.players.all { it.hasAnswered }) {
+                    room.waitingForAnswers = false 
+                }
+            }
+        }
+        MessageType.RESTART -> {
+            val room = rooms.values.find { it.hostSession == session }
+            room?.broadcast(GameMessage(MessageType.RESTART, "Server"))
         }
         else -> {}
     }
@@ -94,22 +101,24 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 suspend fun runGameLoop(room: GameRoom) {
     while (room.currentQuestionIndex < room.questions.size) {
         val question = room.questions[room.currentQuestionIndex]
+        room.players.forEach { it.hasAnswered = false }
+        room.waitingForAnswers = true
         
-        // 1. Στείλε την ερώτηση
         room.broadcast(GameMessage(MessageType.QUESTION, "Server", Gson().toJson(question)))
         
-        // 2. Περίμενε όσο διαρκεί το χρονόμετρο
-        delay(room.timerSeconds * 1000L + 1000L)
+        // Περιμένουμε είτε να τελειώσει ο χρόνος είτε να απαντήσουν όλοι
+        var elapsed = 0
+        while (elapsed < room.timerSeconds && room.waitingForAnswers) {
+            delay(1000)
+            elapsed++
+        }
         
-        // 3. Στείλε τη σωστή απάντηση
+        room.waitingForAnswers = false
         val correctIndex = (question["correctAnswerIndex"] as Double).toInt()
         val options = question["options"] as List<String>
-        val correctAnswer = options[correctIndex]
-        room.broadcast(GameMessage(MessageType.RESULT, "Server", "Σωστή απάντηση: $correctAnswer"))
+        room.broadcast(GameMessage(MessageType.RESULT, "Server", "Σωστή απάντηση: ${options[correctIndex]}"))
         
-        // 4. Περίμενε 5 δευτερόλεπτα πριν την επόμενη
         delay(5000)
-        
         room.currentQuestionIndex++
     }
     room.broadcast(GameMessage(MessageType.GAME_OVER, "Server", "Το παιχνίδι τελείωσε!"))
