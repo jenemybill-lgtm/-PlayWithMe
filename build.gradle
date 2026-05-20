@@ -1,19 +1,16 @@
 plugins {
     id 'org.jetbrains.kotlin.jvm' version '1.9.0'
     id 'com.github.johnrengelman.shadow' version '8.1.1'
+    id 'application'
 }
 
 repositories {
     mavenCentral()
 }
 
-// Λέμε στο Gradle ότι ο κώδικας είναι χύμα στον κεντρικό φάκελο
+// Λέμε στο Gradle ότι το server.kt είναι εδώ!
 sourceSets {
-    main {
-        kotlin {
-            srcDirs = ['.']
-        }
-    }
+    main.kotlin.srcDirs = ['.']
 }
 
 dependencies {
@@ -23,21 +20,13 @@ dependencies {
     implementation "org.slf4j:slf4j-simple:2.0.7"
 }
 
-// Αυτό φτιάχνει το "εκτελέσιμο" αρχείο
+application {
+    mainClass.set('ServerKt')
+}
+
 shadowJar {
-    manifest {
-        attributes 'Main-Class': 'ServerKt'
-    }
     archiveBaseName.set('server')
     archiveClassifier.set('all')
     archiveVersion.set('')
-    
-    // Περιλαμβάνουμε τα πάντα στο Jar
-    from sourceSets.main.output
-}
-
-tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+    mergeServiceFiles()
 }
