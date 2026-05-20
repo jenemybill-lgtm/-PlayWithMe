@@ -16,8 +16,9 @@ data class Player(val name: String, val session: DefaultWebSocketServerSession, 
 
 class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession) {
     val players = mutableListOf<Player>()
-    var questions: List<Any> = emptyList()
+    var questions: List<Map<String, Any>> = emptyList()
     var currentQuestionIndex = 0
+    var timerSeconds = 20
     
     suspend fun broadcast(message: GameMessage) {
         val text = Gson().toJson(message)
@@ -68,34 +69,48 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.START_GAME -> {
             val room = rooms.values.find { it.hostSession == session }
             if (room != null && msg.content != null) {
-                // Λήψη ερωτήσεων από τον Host
-                val listType = object : TypeToken<List<Any>>() {}.type
-                room.questions = gson.fromJson(msg.content, listType)
+                val setupType = object : TypeToken<Map<String, Any>>() {}.type
+                val setup: Map<String, Any> = gson.fromJson(msg.content, setupType)
+                
+                room.questions = setup["questions"] as List<Map<String, Any>>
+                room.timerSeconds = (setup["timer"] as Double).toInt()
                 room.currentQuestionIndex = 0
                 
-                // Ενημέρωση όλων να ξεκινήσουν
-                room.broadcast(GameMessage(MessageType.START_GAME, "Server", "Game Started!"))
+                room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
                 
-                // Αναμονή 3 δευτερόλεπτα και αποστολή 1ης ερώτησης
                 CoroutineScope(Dispatchers.Default).launch {
                     delay(3000)
-                    sendNextQuestion(room)
+                    runGameLoop(room)
                 }
             }
         }
         MessageType.ANSWER -> {
-            // Εδώ μπορείς αργότερα να προσθέσεις πόντους
+            // Logic for scoring can be added here
         }
         else -> {}
     }
 }
 
-suspend fun sendNextQuestion(room: GameRoom) {
-    if (room.currentQuestionIndex < room.questions.size) {
+suspend fun runGameLoop(room: GameRoom) {
+    while (room.currentQuestionIndex < room.questions.size) {
         val question = room.questions[room.currentQuestionIndex]
+        
+        // 1. Στείλε την ερώτηση
         room.broadcast(GameMessage(MessageType.QUESTION, "Server", Gson().toJson(question)))
+        
+        // 2. Περίμενε όσο διαρκεί το χρονόμετρο
+        delay(room.timerSeconds * 1000L + 1000L)
+        
+        // 3. Στείλε τη σωστή απάντηση
+        val correctIndex = (question["correctAnswerIndex"] as Double).toInt()
+        val options = question["options"] as List<String>
+        val correctAnswer = options[correctIndex]
+        room.broadcast(GameMessage(MessageType.RESULT, "Server", "Σωστή απάντηση: $correctAnswer"))
+        
+        // 4. Περίμενε 5 δευτερόλεπτα πριν την επόμενη
+        delay(5000)
+        
         room.currentQuestionIndex++
-    } else {
-        room.broadcast(GameMessage(MessageType.GAME_OVER, "Server", "Game Over!"))
     }
+    room.broadcast(GameMessage(MessageType.GAME_OVER, "Server", "Το παιχνίδι τελείωσε!"))
 }
