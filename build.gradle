@@ -4,11 +4,8 @@ plugins {
     id 'application'
 }
 
-repositories {
-    mavenCentral()
-}
+repositories { mavenCentral() }
 
-// Λέμε στο Gradle ότι το server.kt είναι εδώ!
 sourceSets {
     main.kotlin.srcDirs = ['.']
 }
