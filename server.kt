@@ -12,7 +12,7 @@ import kotlinx.coroutines.*
 
 enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART }
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
-data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var hasAnswered: Boolean = false)
+data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var hasAnswered: Boolean = false, var lastAnswerIndex: Int = -1)
 
 class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession) {
     val players = mutableListOf<Player>()
@@ -63,8 +63,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (room != null) {
                 room.players.add(Player(msg.sender, session))
                 room.broadcast(GameMessage(MessageType.JOIN_RESPONSE, "Server", "Player ${msg.sender} joined"))
-            } else {
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Room not found"))))
             }
         }
         MessageType.START_GAME -> {
@@ -84,7 +82,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val player = room?.players?.find { it.session == session }
             if (room != null && room.waitingForAnswers && player != null && !player.hasAnswered) {
                 player.hasAnswered = true
-                // Αν απάντησαν όλοι, σταματάμε την αναμονή
+                player.lastAnswerIndex = msg.content?.toIntOrNull() ?: -1
                 if (room.players.all { it.hasAnswered }) {
                     room.waitingForAnswers = false 
                 }
@@ -99,14 +97,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 }
 
 suspend fun runGameLoop(room: GameRoom) {
+    val gson = Gson()
     while (room.currentQuestionIndex < room.questions.size) {
         val question = room.questions[room.currentQuestionIndex]
-        room.players.forEach { it.hasAnswered = false }
+        val correctIndex = (question["correctAnswerIndex"] as Double).toInt()
+        
+        room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
         room.waitingForAnswers = true
+        room.broadcast(GameMessage(MessageType.QUESTION, "Server", gson.toJson(question)))
         
-        room.broadcast(GameMessage(MessageType.QUESTION, "Server", Gson().toJson(question)))
-        
-        // Περιμένουμε είτε να τελειώσει ο χρόνος είτε να απαντήσουν όλοι
         var elapsed = 0
         while (elapsed < room.timerSeconds && room.waitingForAnswers) {
             delay(1000)
@@ -114,12 +113,19 @@ suspend fun runGameLoop(room: GameRoom) {
         }
         
         room.waitingForAnswers = false
-        val correctIndex = (question["correctAnswerIndex"] as Double).toInt()
+        room.players.forEach { if (it.lastAnswerIndex == correctIndex) it.score += 10 }
+        
         val options = question["options"] as List<String>
         room.broadcast(GameMessage(MessageType.RESULT, "Server", "Σωστή απάντηση: ${options[correctIndex]}"))
+        delay(4000)
         
-        delay(5000)
+        val leaderboard = room.players.sortedByDescending { it.score }.joinToString("\n") { "${it.name}: ${it.score}" }
+        room.broadcast(GameMessage(MessageType.LEADERBOARD, "Server", "Leaderboard:\n$leaderboard"))
+        delay(4000)
+        
         room.currentQuestionIndex++
     }
-    room.broadcast(GameMessage(MessageType.GAME_OVER, "Server", "Το παιχνίδι τελείωσε!"))
+    val winner = room.players.maxByOrNull { it.score }
+    val finalMsg = if (winner != null) "Νικητής: ${winner.name} με ${winner.score} πόντους!" else "Παιχνίδι Τέλος!"
+    room.broadcast(GameMessage(MessageType.GAME_OVER, "Server", finalMsg))
 }
