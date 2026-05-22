@@ -10,7 +10,7 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 
-// Μηνύματα επικοινωνίας
+// Τύποι μηνυμάτων
 enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART }
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
 data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var hasAnswered: Boolean = false, var lastAnswerIndex: Int = -1, var isEliminated: Boolean = false)
@@ -63,8 +63,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.JOIN -> {
             val room = rooms[msg.content]
             if (room != null) {
-                room.players.add(Player(msg.sender, session))
-                room.broadcast(GameMessage(MessageType.JOIN_RESPONSE, "Server", "Ο παίκτης ${msg.sender} μπήκε!"))
+                // Αν ο παίκτης δεν είναι ήδη στη λίστα, τον προσθέτουμε
+                if (room.players.none { it.session == session }) {
+                    room.players.add(Player(msg.sender, session))
+                }
+                room.broadcast(GameMessage(MessageType.JOIN_RESPONSE, "Server", "Ο παίκτης ${msg.sender} συνδέθηκε!"))
             }
         }
         MessageType.START_GAME -> {
@@ -76,17 +79,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 room.currentQuestionIndex = 0
                 room.isSuddenDeath = false
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
-                CoroutineScope(Dispatchers.Default).launch { delay(3000); runGameLoop(room) }
+                CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
             }
         }
         MessageType.ANSWER -> {
+            // Βρίσκουμε σε ποιο δωμάτιο ανήκει ο παίκτης που απάντησε
             val room = rooms.values.find { r -> r.players.any { it.session == session } }
             val player = room?.players?.find { it.session == session }
             if (room != null && room.waitingForAnswers && player != null && !player.hasAnswered) {
                 player.hasAnswered = true
                 player.lastAnswerIndex = msg.content?.toIntOrNull() ?: -1
-                // Αν απάντησαν όλοι οι παίκτες που δεν έχουν αποκλειστεί
-                if (room.players.filter { !it.isEliminated }.all { it.hasAnswered }) {
+                
+                // Αν απάντησαν όλοι οι μη αποκλεισμένοι παίκτες, σταματάμε την αναμονή
+                val activePlayers = room.players.filter { !it.isEliminated }
+                if (activePlayers.all { it.hasAnswered }) {
                     room.waitingForAnswers = false 
                 }
             }
@@ -96,31 +102,29 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 }
 
 suspend fun runGameLoop(room: GameRoom) {
-    // Κανονικοί Γύροι
+    // Κύριος κύκλος παιχνιδιού
     while (room.currentQuestionIndex < room.questions.size) {
         sendQuestionAndWait(room, room.questions[room.currentQuestionIndex])
         room.currentQuestionIndex++
     }
     
-    // Έλεγχος για Ισοπαλία (Sudden Death)
-    val sortedPlayers = room.players.sortedByDescending { it.score }
-    if (sortedPlayers.size >= 2 && sortedPlayers[0].score == sortedPlayers[1].score) {
+    // Έλεγχος Ισοπαλίας (Sudden Death)
+    val sorted = room.players.sortedByDescending { it.score }
+    if (sorted.size >= 2 && sorted[0].score == sorted[1].score && sorted[0].score > 0) {
         room.isSuddenDeath = true
-        room.broadcast(GameMessage(MessageType.RESULT, "Server", "ΙΣΟΠΑΛΙΑ! ΞΕΚΙΝΑΕΙ SUDDEN DEATH!"))
+        room.broadcast(GameMessage(MessageType.RESULT, "Server", "ΙΣΟΠΑΛΙΑ! SUDDEN DEATH!"))
         delay(4000)
         
-        val topScore = sortedPlayers[0].score
+        val topScore = sorted[0].score
         room.players.forEach { if (it.score < topScore) it.isEliminated = true }
-
+        
         while (room.players.count { !it.isEliminated } > 1) {
-            val sdQuestion = room.questions.shuffled().first()
-            sendQuestionAndWait(room, sdQuestion)
-            
-            val correctIdx = (sdQuestion["correctAnswerIndex"] as Double).toInt()
+            val q = room.questions.shuffled().first()
+            sendQuestionAndWait(room, q)
+            val correctIdx = (q["correctAnswerIndex"] as Double).toInt()
             room.players.filter { !it.isEliminated }.forEach { 
                 if (it.lastAnswerIndex != correctIdx) it.isEliminated = true 
             }
-            // Αν όλοι το βρήκαν λάθος, τους κρατάμε για ακόμα έναν γύρο
             if (room.players.count { !it.isEliminated } == 0) {
                 room.players.forEach { if (it.score == topScore) it.isEliminated = false }
                 room.broadcast(GameMessage(MessageType.RESULT, "Server", "Όλοι λάθος! Ξανά..."))
@@ -129,30 +133,36 @@ suspend fun runGameLoop(room: GameRoom) {
         }
     }
 
-    // Τελικά Αποτελέσματα
+    // Τελική Κατάταξη και Μηνύματα
     val finalRank = room.players.sortedByDescending { it.score }
     val winner = finalRank.firstOrNull()
     val rankingText = finalRank.withIndex().joinToString("\n") { "${it.index + 1}. ${it.value.name}: ${it.value.score}" }
     
-    finalRank.forEach { p ->
-        val msg = if (p == winner) "Χάρηκες ??? Δεν νίκησες και τον Τέσλα!" else "Έχασες από αυτόν ?? (${winner?.name})"
+    room.players.forEach { p ->
+        val resultMsg = if (p.name == winner?.name) "Χάρηκες ??? Δεν νίκησες και τον Τέσλα!" else "Έχασες από αυτόν ?? (${winner?.name})"
         try {
-            p.session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.GAME_OVER, "Server", "$msg\n\nΚΑΤΑΤΑΞΗ:\n$rankingText"))))
+            p.session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.GAME_OVER, "Server", "$resultMsg\n\nΚΑΤΑΤΑΞΗ:\n$rankingText"))))
         } catch(e: Exception) {}
     }
-    // Ενημέρωση και του Host
-    room.hostSession.send(Frame.Text(Gson().toJson(GameMessage(MessageType.GAME_OVER, "Server", "Παιχνίδι Τέλος!\n\nΚΑΤΑΤΑΞΗ:\n$rankingText"))))
+    
+    // Ενημέρωση και του Host (αν δεν συμμετείχε ως παίκτης)
+    try {
+        room.hostSession.send(Frame.Text(Gson().toJson(GameMessage(MessageType.GAME_OVER, "Server", "Παιχνίδι Τέλος!\n\nΚΑΤΑΤΑΞΗ:\n$rankingText"))))
+    } catch(e: Exception) {}
 }
 
 suspend fun sendQuestionAndWait(room: GameRoom, question: Map<String, Any>) {
     val gson = Gson()
     val correctIdx = (question["correctAnswerIndex"] as Double).toInt()
     
+    // Προετοιμασία γύρου
     room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
     room.waitingForAnswers = true
     
+    // Αποστολή ερώτησης
     room.broadcast(GameMessage(MessageType.QUESTION, "Server", gson.toJson(question)))
     
+    // Περιμένει τον χρόνο ή μέχρι να απαντήσουν όλοι
     var elapsed = 0
     while (elapsed < room.timerSeconds && room.waitingForAnswers) {
         delay(1000)
@@ -160,16 +170,18 @@ suspend fun sendQuestionAndWait(room: GameRoom, question: Map<String, Any>) {
     }
     
     room.waitingForAnswers = false
-    // Μόνο στους κανονικούς γύρους δίνουμε πόντους
+    // Υπολογισμός σκορ (μόνο αν δεν είναι Sudden Death)
     if (!room.isSuddenDeath) {
         room.players.forEach { if (it.lastAnswerIndex == correctIdx) it.score += 10 }
     }
     
+    // Εμφάνιση σωστής απάντησης
     val options = question["options"] as List<String>
     room.broadcast(GameMessage(MessageType.RESULT, "Server", "Σωστή απάντηση: ${options[correctIdx]}"))
     delay(4000)
     
-    val leaderboard = room.players.sortedByDescending { it.score }.joinToString("\n") { "${it.name}: ${it.score}" }
-    room.broadcast(GameMessage(MessageType.LEADERBOARD, "Server", "Σκορ:\n$leaderboard"))
-    delay(4000)
+    // Ενημέρωση Leaderboard
+    val lb = room.players.sortedByDescending { it.score }.joinToString("\n") { "${it.name}: ${it.score}" }
+    room.broadcast(GameMessage(MessageType.LEADERBOARD, "Server", "Σκορ:\n$lb"))
+    delay(3000)
 }
