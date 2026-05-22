@@ -10,6 +10,7 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 
+// Τύποι μηνυμάτων
 enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART }
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
 data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var hasAnswered: Boolean = false, var lastAnswerIndex: Int = -1, var isEliminated: Boolean = false)
@@ -22,10 +23,15 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
     var waitingForAnswers = false
     var isSuddenDeath = false
     
+    // Στέλνει μήνυμα σε όλους τους παίκτες ΜΙΑ φορά τον καθένα
     suspend fun broadcast(message: GameMessage) {
         val text = Gson().toJson(message)
-        try { hostSession.send(Frame.Text(text)) } catch(e: Exception) {}
-        players.forEach { try { it.session.send(Frame.Text(text)) } catch(e: Exception) {} }
+        val sessions = players.map { it.session }.toSet()
+        sessions.forEach { try { it.send(Frame.Text(text)) } catch(e: Exception) {} }
+        // Αν ο host δεν είναι στην λίστα (για ασφάλεια), στείλε και σε αυτόν
+        if (!sessions.contains(hostSession)) {
+            try { hostSession.send(Frame.Text(text)) } catch(e: Exception) {}
+        }
     }
 }
 
@@ -46,7 +52,7 @@ fun main() {
                         }
                     }
                 } catch (e: Exception) { e.printStackTrace() }
-                // Cleanup on disconnect
+                // Καθαρισμός αν κάποιος βγει
                 rooms.values.removeIf { it.hostSession == this }
                 rooms.values.forEach { it.players.removeIf { p -> p.session == this } }
             }
@@ -60,7 +66,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.CREATE_ROOM -> {
             val code = (1000..9999).random().toString()
             val room = GameRoom(code, session)
-            // Ο Host προστίθεται αυτόματα ως ο πρώτος παίκτης
+            // Ο Host μπαίνει αυτόματα ως ο 1ος παίκτης
             room.players.add(Player(msg.sender, session))
             rooms[code] = room
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.JOIN_RESPONSE, "Server", code))))
@@ -72,6 +78,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     room.players.add(Player(msg.sender, session))
                 }
                 room.broadcast(GameMessage(MessageType.JOIN_RESPONSE, "Server", room.code))
+            } else {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν βρέθηκε δωμάτιο!"))))
             }
         }
         MessageType.START_GAME -> {
@@ -83,7 +91,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 room.currentQuestionIndex = 0
                 room.isSuddenDeath = false
                 
-                // ΜΗΔΕΝΙΣΜΟΣ ΣΤΑΤΙΣΤΙΚΩΝ ΓΙΑ ΝΕΟ ΠΑΙΧΝΙΔΙ
+                // Μηδενισμός για νέο παιχνίδι
                 room.players.forEach {
                     it.score = 0
                     it.isEliminated = false
@@ -101,8 +109,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 player.hasAnswered = true
                 player.lastAnswerIndex = msg.content?.toIntOrNull() ?: -1
                 
-                val activePlayers = room.players.filter { !it.isEliminated }
-                if (activePlayers.all { it.hasAnswered }) {
+                // Αν απάντησαν όλοι οι παίκτες που παίζουν
+                val activeCount = room.players.count { !it.isEliminated }
+                val answeredCount = room.players.count { !it.isEliminated && it.hasAnswered }
+                if (answeredCount >= activeCount) {
                     room.waitingForAnswers = false 
                 }
             }
@@ -141,6 +151,7 @@ suspend fun runGameLoop(room: GameRoom) {
         }
     }
 
+    // ΤΕΛΙΚΑ ΑΠΟΤΕΛΕΣΜΑΤΑ
     val finalRank = room.players.sortedByDescending { it.score }
     val winner = finalRank.firstOrNull()
     val rankingText = finalRank.withIndex().joinToString("\n") { "${it.index + 1}. ${it.value.name}: ${it.value.score}" }
