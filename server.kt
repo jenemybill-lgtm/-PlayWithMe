@@ -147,7 +147,7 @@ suspend fun runGameLoop(room: GameRoom) {
     val rankingText = finalRank.withIndex().joinToString("\n") { "${it.index + 1}. ${it.value.name}: ${it.value.score} (Σ:${it.value.correctCount} Λ:${it.value.wrongCount})" }
 
     room.players.forEach { p ->
-        val resultMsg = if (p.name == winner?.name) "Χάρηκες ??? Δεν νίκησες και τον Τέσλα!" else "Έχασες από αυτόν ?? (${winner?.name})"
+        val resultMsg = if (p.name == winner?.name) "Χάρηκες ; Πλήγωσες μια ψυχουλα !" else "Έχασες από αυτόν ?? (${winner?.name})"
         try { p.session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.GAME_OVER, "Server", "$resultMsg\n\nΚΑΤΑΤΑΞΗ:\n$rankingText")))) } catch(e: Exception) {}
     }
 }
