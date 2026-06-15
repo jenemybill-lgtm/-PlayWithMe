@@ -22,7 +22,7 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
     var timerSeconds = 20
     var waitingForAnswers = false
     var isSuddenDeath = false
-    
+
     suspend fun broadcast(message: GameMessage) {
         val text = Gson().toJson(message)
         val uniqueSessions = players.map { it.session }.toMutableSet()
@@ -93,7 +93,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 player.hasAnswered = true
                 player.lastAnswerIndex = msg.content?.toIntOrNull() ?: -1
                 val activePlayers = room.players.filter { !it.isEliminated }
-                if (activePlayers.all { it.hasAnswered }) room.waitingForAnswers = false 
+                if (activePlayers.all { it.hasAnswered }) room.waitingForAnswers = false
             }
         }
         else -> {}
@@ -105,7 +105,6 @@ suspend fun runGameLoop(room: GameRoom) {
         sendQuestionAndWait(room, room.questions[room.currentQuestionIndex])
         room.currentQuestionIndex++
     }
-    
     val sorted = room.players.sortedByDescending { it.score }
     if (sorted.size >= 2 && sorted[0].score == sorted[1].score && sorted[0].score > 0) {
         room.isSuddenDeath = true
@@ -123,11 +122,9 @@ suspend fun runGameLoop(room: GameRoom) {
             sdIdx++
         }
     }
-
     val finalRank = room.players.sortedByDescending { it.score }
     val winner = finalRank.firstOrNull()
     val rankingText = finalRank.withIndex().joinToString("\n") { "${it.index + 1}. ${it.value.name}: ${it.value.score}" }
-    
     room.players.forEach { p ->
         val resultMsg = if (p.name == winner?.name) "Χάρηκες ??? Δεν νίκησες και τον Τέσλα!" else "Έχασες από αυτόν ?? (${winner?.name})"
         try { p.session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.GAME_OVER, "Server", "$resultMsg\n\nΚΑΤΑΤΑΞΗ:\n$rankingText")))) } catch(e: Exception) {}
