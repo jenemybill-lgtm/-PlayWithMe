@@ -10,9 +10,10 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 
-enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART }
+// RESTART is for returning to menu, PLAYER_COUNT is for host updates
+enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT }
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
-data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var hasAnswered: Boolean = false, var lastAnswerIndex: Int = -1, var isEliminated: Boolean = false)
+data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var correctCount: Int = 0, var wrongCount: Int = 0, var hasAnswered: Boolean = false, var lastAnswerIndex: Int = -1, var isEliminated: Boolean = false)
 
 class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession) {
     val players = mutableListOf<Player>()
@@ -28,6 +29,11 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
         val uniqueSessions = players.map { it.session }.toMutableSet()
         uniqueSessions.add(hostSession)
         uniqueSessions.forEach { try { it.send(Frame.Text(text)) } catch(e: Exception) {} }
+    }
+
+    suspend fun updateHostPlayerCount() {
+        val msg = GameMessage(MessageType.PLAYER_COUNT, "Server", "${players.size}")
+        try { hostSession.send(Frame.Text(Gson().toJson(msg))) } catch(e: Exception) {}
     }
 }
 
@@ -48,8 +54,14 @@ fun main() {
                         }
                     }
                 } catch (e: Exception) { e.printStackTrace() }
+                // Cleanup
+                rooms.values.forEach { room ->
+                    if (room.players.any { it.session == this }) {
+                        room.players.removeIf { it.session == this }
+                        runBlocking { room.updateHostPlayerCount() }
+                    }
+                }
                 rooms.values.removeIf { it.hostSession == this }
-                rooms.values.forEach { it.players.removeIf { p -> p.session == this } }
             }
         }
     }.start(wait = true)
@@ -64,12 +76,16 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             room.players.add(Player(msg.sender, session))
             rooms[code] = room
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.JOIN_RESPONSE, "Server", code))))
+            room.updateHostPlayerCount()
         }
         MessageType.JOIN -> {
             val room = rooms[msg.content]
             if (room != null) {
-                if (room.players.none { it.session == session }) room.players.add(Player(msg.sender, session))
+                if (room.players.none { it.session == session }) {
+                    room.players.add(Player(msg.sender, session))
+                }
                 room.broadcast(GameMessage(MessageType.JOIN_RESPONSE, "Server", room.code))
+                room.updateHostPlayerCount()
             }
         }
         MessageType.START_GAME -> {
@@ -81,7 +97,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 room.timerSeconds = (setup["timer"] as Double).toInt()
                 room.currentQuestionIndex = 0
                 room.isSuddenDeath = false
-                room.players.forEach { it.score = 0; it.isEliminated = false; it.hasAnswered = false }
+                room.players.forEach { it.score = 0; it.correctCount = 0; it.wrongCount = 0; it.isEliminated = false; it.hasAnswered = false }
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
                 CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
             }
@@ -105,6 +121,7 @@ suspend fun runGameLoop(room: GameRoom) {
         sendQuestionAndWait(room, room.questions[room.currentQuestionIndex])
         room.currentQuestionIndex++
     }
+
     val sorted = room.players.sortedByDescending { it.score }
     if (sorted.size >= 2 && sorted[0].score == sorted[1].score && sorted[0].score > 0) {
         room.isSuddenDeath = true
@@ -112,6 +129,7 @@ suspend fun runGameLoop(room: GameRoom) {
         delay(4000)
         val topScore = sorted[0].score
         room.players.forEach { if (it.score < topScore) it.isEliminated = true }
+
         var sdIdx = 0
         while (room.players.count { !it.isEliminated } > 1 && sdIdx < room.extraQuestions.size) {
             val q = room.extraQuestions[sdIdx]
@@ -122,9 +140,12 @@ suspend fun runGameLoop(room: GameRoom) {
             sdIdx++
         }
     }
+
     val finalRank = room.players.sortedByDescending { it.score }
     val winner = finalRank.firstOrNull()
-    val rankingText = finalRank.withIndex().joinToString("\n") { "${it.index + 1}. ${it.value.name}: ${it.value.score}" }
+    // Detailed ranking with Correct/Wrong counts
+    val rankingText = finalRank.withIndex().joinToString("\n") { "${it.index + 1}. ${it.value.name}: ${it.value.score} (Σ:${it.value.correctCount} Λ:${it.value.wrongCount})" }
+
     room.players.forEach { p ->
         val resultMsg = if (p.name == winner?.name) "Χάρηκες ??? Δεν νίκησες και τον Τέσλα!" else "Έχασες από αυτόν ?? (${winner?.name})"
         try { p.session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.GAME_OVER, "Server", "$resultMsg\n\nΚΑΤΑΤΑΞΗ:\n$rankingText")))) } catch(e: Exception) {}
@@ -140,11 +161,21 @@ suspend fun sendQuestionAndWait(room: GameRoom, question: Map<String, Any>) {
     var elapsed = 0
     while (elapsed < room.timerSeconds && room.waitingForAnswers) { delay(1000); elapsed++ }
     room.waitingForAnswers = false
-    if (!room.isSuddenDeath) room.players.forEach { if (it.lastAnswerIndex == correctIdx) it.score += 10 }
+
+    // Update Score (+1 instead of +10) and counts
+    room.players.forEach { p ->
+        if (p.lastAnswerIndex == correctIdx) {
+            if (!room.isSuddenDeath) p.score += 1
+            p.correctCount += 1
+        } else if (p.lastAnswerIndex != -1) {
+            p.wrongCount += 1
+        }
+    }
+
     val options = question["options"] as List<String>
     room.broadcast(GameMessage(MessageType.RESULT, "Server", "Σωστή απάντηση: ${options[correctIdx]}"))
     delay(4000)
-    val lb = room.players.sortedByDescending { it.score }.joinToString("\n") { "${it.name}: ${it.score}" }
-    room.broadcast(GameMessage(MessageType.LEADERBOARD, "Server", "Σκορ:\n$lb"))
-    delay(3000)
+    // LEADERBOARD is now empty/hidden during game as requested
+    room.broadcast(GameMessage(MessageType.LEADERBOARD, "Server", ""))
+    delay(1000)
 }
