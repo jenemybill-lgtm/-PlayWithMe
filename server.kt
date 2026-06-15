@@ -25,11 +25,9 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
     
     suspend fun broadcast(message: GameMessage) {
         val text = Gson().toJson(message)
-        val sessions = players.map { it.session }.toSet()
-        sessions.forEach { try { it.send(Frame.Text(text)) } catch(e: Exception) {} }
-        if (!sessions.contains(hostSession)) {
-            try { hostSession.send(Frame.Text(text)) } catch(e: Exception) {}
-        }
+        val uniqueSessions = players.map { it.session }.toMutableSet()
+        uniqueSessions.add(hostSession)
+        uniqueSessions.forEach { try { it.send(Frame.Text(text)) } catch(e: Exception) {} }
     }
 }
 
@@ -115,7 +113,6 @@ suspend fun runGameLoop(room: GameRoom) {
         delay(4000)
         val topScore = sorted[0].score
         room.players.forEach { if (it.score < topScore) it.isEliminated = true }
-        
         var sdIdx = 0
         while (room.players.count { !it.isEliminated } > 1 && sdIdx < room.extraQuestions.size) {
             val q = room.extraQuestions[sdIdx]
@@ -132,7 +129,7 @@ suspend fun runGameLoop(room: GameRoom) {
     val rankingText = finalRank.withIndex().joinToString("\n") { "${it.index + 1}. ${it.value.name}: ${it.value.score}" }
     
     room.players.forEach { p ->
-        val resultMsg = if (p.session == winner?.session) "Χάρηκες ??? Δεν νίκησες και τον Τέσλα!" else "Έχασες από αυτόν ?? (${winner?.name})"
+        val resultMsg = if (p.name == winner?.name) "Χάρηκες ??? Δεν νίκησες και τον Τέσλα!" else "Έχασες από αυτόν ?? (${winner?.name})"
         try { p.session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.GAME_OVER, "Server", "$resultMsg\n\nΚΑΤΑΤΑΞΗ:\n$rankingText")))) } catch(e: Exception) {}
     }
 }
