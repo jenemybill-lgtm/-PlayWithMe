@@ -11,8 +11,9 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 
 // --- CONFIGURATION ---
-const val LATEST_VERSION = 9
-const val UPDATE_URL = "https://raw.githubusercontent.com/jenemybill-lgtm/PlayWithMe/main/app-debug.apk"
+const val LATEST_VERSION_NAME = "1.8"
+const val LATEST_VERSION_CODE = 9
+val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 // ---------------------
 
 enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT, VERSION_CHECK }
@@ -50,7 +51,7 @@ fun main() {
         routing {
             webSocket("/ws") {
                 // Send version info immediately on connection
-                val versionMsg = GameMessage(MessageType.VERSION_CHECK, "Server", "$LATEST_VERSION|$UPDATE_URL")
+                val versionMsg = GameMessage(MessageType.VERSION_CHECK, "Server", "$LATEST_VERSION_CODE|$UPDATE_URL")
                 try { send(Frame.Text(Gson().toJson(versionMsg))) } catch(e: Exception) {}
 
                 try {
