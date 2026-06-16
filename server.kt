@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 
 // --- CONFIGURATION ---
-const val LATEST_VERSION = 8
+const val LATEST_VERSION = 9
 const val UPDATE_URL = "https://raw.githubusercontent.com/jenemybill-lgtm/PlayWithMe/main/app-debug.apk"
 // ---------------------
 
