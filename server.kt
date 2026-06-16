@@ -10,8 +10,12 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 
-// RESTART is for returning to menu, PLAYER_COUNT is for host updates
-enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT }
+// --- CONFIGURATION ---
+const val LATEST_VERSION = 8
+const val UPDATE_URL = "https://raw.githubusercontent.com/jenemybill-lgtm/PlayWithMe/main/app-debug.apk"
+// ---------------------
+
+enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT, VERSION_CHECK }
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
 data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var correctCount: Int = 0, var wrongCount: Int = 0, var hasAnswered: Boolean = false, var lastAnswerIndex: Int = -1, var isEliminated: Boolean = false)
 
@@ -45,6 +49,10 @@ fun main() {
         install(WebSockets)
         routing {
             webSocket("/ws") {
+                // Send version info immediately on connection
+                val versionMsg = GameMessage(MessageType.VERSION_CHECK, "Server", "$LATEST_VERSION|$UPDATE_URL")
+                try { send(Frame.Text(Gson().toJson(versionMsg))) } catch(e: Exception) {}
+
                 try {
                     for (frame in incoming) {
                         if (frame is Frame.Text) {
@@ -54,6 +62,7 @@ fun main() {
                         }
                     }
                 } catch (e: Exception) { e.printStackTrace() }
+
                 // Cleanup
                 rooms.values.forEach { room ->
                     if (room.players.any { it.session == this }) {
@@ -143,7 +152,6 @@ suspend fun runGameLoop(room: GameRoom) {
 
     val finalRank = room.players.sortedByDescending { it.score }
     val winner = finalRank.firstOrNull()
-    // Detailed ranking with Correct/Wrong counts
     val rankingText = finalRank.withIndex().joinToString("\n") { "${it.index + 1}. ${it.value.name}: ${it.value.score} (Σ:${it.value.correctCount} Λ:${it.value.wrongCount})" }
 
     room.players.forEach { p ->
@@ -162,7 +170,6 @@ suspend fun sendQuestionAndWait(room: GameRoom, question: Map<String, Any>) {
     while (elapsed < room.timerSeconds && room.waitingForAnswers) { delay(1000); elapsed++ }
     room.waitingForAnswers = false
 
-    // Update Score (+1 instead of +10) and counts
     room.players.forEach { p ->
         if (p.lastAnswerIndex == correctIdx) {
             if (!room.isSuddenDeath) p.score += 1
@@ -175,7 +182,6 @@ suspend fun sendQuestionAndWait(room: GameRoom, question: Map<String, Any>) {
     val options = question["options"] as List<String>
     room.broadcast(GameMessage(MessageType.RESULT, "Server", "Σωστή απάντηση: ${options[correctIdx]}"))
     delay(4000)
-    // LEADERBOARD is now empty/hidden during game as requested
     room.broadcast(GameMessage(MessageType.LEADERBOARD, "Server", ""))
     delay(1000)
 }
