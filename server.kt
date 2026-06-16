@@ -50,8 +50,8 @@ fun main() {
         install(WebSockets)
         routing {
             webSocket("/ws") {
-                // Send version info immediately on connection
-                val versionMsg = GameMessage(MessageType.VERSION_CHECK, "Server", "$LATEST_VERSION_CODE|$UPDATE_URL")
+                // Send version info immediately on connection: CODE|URL|NAME
+                val versionMsg = GameMessage(MessageType.VERSION_CHECK, "Server", "$LATEST_VERSION_CODE|$UPDATE_URL|$LATEST_VERSION_NAME")
                 try { send(Frame.Text(Gson().toJson(versionMsg))) } catch(e: Exception) {}
 
                 try {
