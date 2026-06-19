@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "1.9.10"
+    id("org.jetbrains.kotlin.jvm") version "1.9.10"
     id("io.ktor.plugin") version "2.3.5"
     id("com.github.johnrengelman.shadow") version "8.1.1"
 }
@@ -12,20 +12,16 @@ repositories {
 }
 
 dependencies {
-    // Ktor Server Core & Netty
     implementation("io.ktor:ktor-server-core:2.3.5")
     implementation("io.ktor:ktor-server-netty:2.3.5")
     implementation("io.ktor:ktor-server-websockets:2.3.5")
     implementation("io.ktor:ktor-server-content-negotiation:2.3.5")
     implementation("io.ktor:ktor-serialization-gson:2.3.5")
-
-    // JSON & Serialization
     implementation("com.google.code.gson:gson:2.10.1")
-
-    // MongoDB Driver - THE MISSING PART
+    
+    // MongoDB Driver - Απαραίτητο για τους φίλους!
     implementation("org.mongodb:mongodb-driver-kotlin-coroutine:4.11.0")
-
-    // Logging
+    
     implementation("ch.qos.logback:logback-classic:1.4.11")
 }
 
@@ -34,5 +30,5 @@ kotlin {
 }
 
 application {
-    mainClass.set("ServerKt") // ΠΡΟΣΟΧΗ: Πρέπει να είναι ServerKt, όχι server.kt
+    mainClass.set("ServerKt") 
 }
