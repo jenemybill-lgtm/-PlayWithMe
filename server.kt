@@ -79,7 +79,9 @@ suspend fun initDatabase() {
 }
 
 fun main() {
-    runBlocking { initDatabase() }
+    // Start database in background to avoid blocking server start
+    GlobalScope.launch { initDatabase() }
+
     val port = System.getenv("PORT")?.toInt() ?: 8080
     println("Starting server on port $port...")
     embeddedServer(Netty, port = port, host = "0.0.0.0") {
