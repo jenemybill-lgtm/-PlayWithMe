@@ -30,7 +30,8 @@ kotlin {
 }
 
 application {
-    mainClass.set("ServerKt") 
+    mainClass.set("com.example.ServerKt") 
+}
 }
 tasks.getByName<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar") {
     archiveBaseName.set("server")
