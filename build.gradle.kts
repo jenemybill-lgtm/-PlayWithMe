@@ -26,6 +26,7 @@ kotlin {
     jvmToolchain(17)
 }
 
-application {
-    mainClass.set("com.example.ServerKt")
-}
+  application {
+        mainClass.set("ServerKt") 
+    }
+    
