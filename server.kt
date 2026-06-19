@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap
 const val LATEST_VERSION_NAME = "2.0"
 const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
-const val MONGODB_URI = "mongodb+srv://jenemybill:<PASSWORD>@jenemybill.jchjibj.mongodb.net/?appName=jenemybill"
+const val MONGODB_URI = "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/?appName=jenemybill"
 // ---------------------
 
 enum class MessageType {
