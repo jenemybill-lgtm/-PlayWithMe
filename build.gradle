@@ -34,5 +34,5 @@ kotlin {
 }
 
 application {
-    mainClass.set("server.kt") // IMPORTANT: Make sure your code file is named 'server.kt'
+    mainClass.set("ServerKt") // ΠΡΟΣΟΧΗ: Πρέπει να είναι ServerKt, όχι server.kt
 }
