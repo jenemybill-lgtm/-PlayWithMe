@@ -66,17 +66,22 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
 
 suspend fun initDatabase() {
     try {
+        println("Connecting to MongoDB...")
         val client = MongoClient.create(MONGODB_URI)
         database = client.getDatabase("playwithme")
-        println("Connected to MongoDB Atlas!")
+        // Test connection
+        database.listCollectionNames().collect { println("Collection found: $it") }
+        println("Connected to MongoDB Atlas successfully!")
     } catch (e: Exception) {
-        println("MongoDB Connection Error: ${e.message}")
+        println("CRITICAL: MongoDB Connection Error: ${e.message}")
+        e.printStackTrace()
     }
 }
 
 fun main() {
     runBlocking { initDatabase() }
     val port = System.getenv("PORT")?.toInt() ?: 8080
+    println("Starting server on port $port...")
     embeddedServer(Netty, port = port, host = "0.0.0.0") {
         install(WebSockets)
         routing {
@@ -118,6 +123,11 @@ fun main() {
 }
 
 suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessage) {
+    if (!::database.isInitialized) {
+        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Database not connected yet. Try again in a moment."))))
+        return
+    }
+
     val usersColl = database.getCollection<Map<String, Any>>("users")
     val friendsColl = database.getCollection<Map<String, Any>>("friends")
     val requestsColl = database.getCollection<Map<String, Any>>("requests")
@@ -141,7 +151,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             // Send and clear pending messages
             pendingColl.find(Filters.eq("target", name)).collect { doc ->
-                val type = MessageType.valueOf(doc["type"] as String)
+                val typeStr = doc["type"] as String
+                val type = MessageType.valueOf(typeStr)
                 session.send(Frame.Text(gson.toJson(GameMessage(type, "Server", doc["content"] as String))))
             }
             pendingColl.deleteMany(Filters.eq("target", name))
@@ -277,6 +288,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 }
 
 suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession) {
+    if (!::database.isInitialized) return
     val friendsColl = database.getCollection<Map<String, Any>>("friends")
     val friends = mutableListOf<FriendInfo>()
     friendsColl.find(Filters.eq("user", user)).collect { doc ->
@@ -287,6 +299,7 @@ suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession)
 }
 
 suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession) {
+    if (!::database.isInitialized) return
     val requestsColl = database.getCollection<Map<String, Any>>("requests")
     val doc = requestsColl.find(Filters.eq("target", user)).firstOrNull()
     val requesters = (doc?.get("requesters") as? List<*>)?.map { it.toString() } ?: emptyList()
@@ -294,6 +307,7 @@ suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession
 }
 
 suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
+    if (!::database.isInitialized) return
     val friendsColl = database.getCollection<Map<String, Any>>("friends")
     friendsColl.find(Filters.eq("friend", user)).collect { doc ->
         val friendName = doc["user"] as String
