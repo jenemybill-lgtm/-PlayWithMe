@@ -16,9 +16,13 @@ const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 // ---------------------
 
-enum class MessageType { CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT, VERSION_CHECK }
+enum class MessageType {
+    CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT, VERSION_CHECK,
+    REGISTER, REGISTER_RESPONSE, LOGIN, LOGIN_RESPONSE, ADD_FRIEND, FRIEND_LIST, INVITE, INVITE_RECEIVED
+}
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
 data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var correctCount: Int = 0, var wrongCount: Int = 0, var hasAnswered: Boolean = false, var lastAnswerIndex: Int = -1, var isEliminated: Boolean = false, var totalTime: Long = 0)
+data class FriendInfo(val name: String, var isOnline: Boolean, var currentRoom: String? = null)
 
 class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession) {
     val players = mutableListOf<Player>()
@@ -46,6 +50,9 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
 }
 
 val rooms = ConcurrentHashMap<String, GameRoom>()
+val registeredUsers = ConcurrentHashMap<String, Boolean>()
+val friendsMap = ConcurrentHashMap<String, MutableSet<String>>()
+val onlineUsers = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
 
 fun main() {
     val port = System.getenv("PORT")?.toInt() ?: 8080
@@ -66,7 +73,14 @@ fun main() {
                     }
                 } catch (e: Exception) { e.printStackTrace() }
 
-                // Cleanup and "One Out, All Out" logic
+                // Cleanup
+                var disconnectedUser: String? = null
+                onlineUsers.forEach { (name, session) -> if (session == this) disconnectedUser = name }
+                if (disconnectedUser != null) {
+                    onlineUsers.remove(disconnectedUser)
+                    notifyFriendsStatus(disconnectedUser!!, false)
+                }
+
                 rooms.values.forEach { room ->
                     if (room.players.any { it.session == this } || room.hostSession == this) {
                         if (room.isGameRunning) {
@@ -85,8 +99,52 @@ fun main() {
 suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessage) {
     val gson = Gson()
     when (msg.type) {
+        MessageType.REGISTER -> {
+            val name = msg.content ?: return
+            if (registeredUsers.containsKey(name)) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "TAKEN"))))
+            } else {
+                registeredUsers[name] = true
+                friendsMap[name] = mutableSetOf()
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "OK"))))
+            }
+        }
+        MessageType.LOGIN -> {
+            val name = msg.content ?: return
+            onlineUsers[name] = session
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
+            sendFriendList(name, session)
+            notifyFriendsStatus(name, true)
+        }
+        MessageType.ADD_FRIEND -> {
+            val user = msg.sender
+            val target = msg.content ?: return
+            if (registeredUsers.containsKey(target)) {
+                friendsMap.getOrPut(user) { mutableSetOf() }.add(target)
+                friendsMap.getOrPut(target) { mutableSetOf() }.add(user)
+                sendFriendList(user, session)
+                val targetSession = onlineUsers[target]
+                if (targetSession != null) sendFriendList(target, targetSession)
+            } else {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο παίκτης $target δεν βρέθηκε!"))))
+            }
+        }
+        MessageType.INVITE -> {
+            val host = msg.sender
+            val target = msg.content ?: return
+            val targetSession = onlineUsers[target]
+            if (targetSession != null) {
+                // Find host's room code
+                val room = rooms.values.find { it.hostSession == session }
+                if (room != null) {
+                    targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.INVITE_RECEIVED, "Server", "$host|${room.code}"))))
+                } else {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Πρέπει να είσαι σε δωμάτιο για να καλέσεις!"))))
+                }
+            }
+        }
         MessageType.CREATE_ROOM -> {
-            val code = (1000..9999).random().toString()
+            val code = (10000..99999).random().toString()
             val room = GameRoom(code, session)
             room.players.add(Player(msg.sender, session))
             rooms[code] = room
@@ -134,6 +192,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
         }
         else -> {}
+    }
+}
+
+suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession) {
+    val friends = friendsMap[user] ?: return
+    val infoList = friends.map { FriendInfo(it, onlineUsers.containsKey(it)) }
+    session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.FRIEND_LIST, "Server", Gson().toJson(infoList)))))
+}
+
+suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
+    onlineUsers.forEach { (name, session) ->
+        if (friendsMap[name]?.contains(user) == true) {
+            sendFriendList(name, session)
+        }
     }
 }
 
