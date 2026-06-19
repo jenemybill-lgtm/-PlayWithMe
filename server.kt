@@ -6,6 +6,7 @@ import io.ktor.websocket.*
 import io.ktor.server.application.*
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import java.io.File
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
@@ -14,16 +15,31 @@ import kotlinx.coroutines.*
 const val LATEST_VERSION_NAME = "2.0"
 const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
+const val DATA_FILE = "server_data.json"
 // ---------------------
 
 enum class MessageType {
     CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT, VERSION_CHECK,
     REGISTER, REGISTER_RESPONSE, LOGIN, LOGIN_RESPONSE, ADD_FRIEND, FRIEND_LIST, INVITE, INVITE_RECEIVED,
-    ACCEPT_REQUEST, REJECT_REQUEST, REQUEST_LIST
+    ACCEPT_REQUEST, REJECT_REQUEST, REQUEST_LIST,
+    CHALLENGE_FRIEND, CHALLENGE_RECEIVED, CHALLENGE_RESULT
 }
+
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
 data class Player(val name: String, val session: DefaultWebSocketServerSession, var score: Int = 0, var correctCount: Int = 0, var wrongCount: Int = 0, var hasAnswered: Boolean = false, var lastAnswerIndex: Int = -1, var isEliminated: Boolean = false, var totalTime: Long = 0)
-data class FriendInfo(val name: String, var isOnline: Boolean, var currentRoom: String? = null)
+data class FriendInfo(val name: String, var isOnline: Boolean)
+
+// Persistence Models
+data class ServerData(
+    val users: MutableSet<String> = mutableSetOf(),
+    val friends: MutableMap<String, MutableSet<String>> = mutableMapOf(),
+    val requests: MutableMap<String, MutableSet<String>> = mutableMapOf()
+)
+
+var globalData = ServerData()
+val onlineUsers = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
+val rooms = ConcurrentHashMap<String, GameRoom>()
+val gson = Gson()
 
 class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession) {
     val players = mutableListOf<Player>()
@@ -38,7 +54,7 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
     var isGameRunning = false
 
     suspend fun broadcast(message: GameMessage) {
-        val text = Gson().toJson(message)
+        val text = gson.toJson(message)
         val uniqueSessions = players.map { it.session }.toMutableSet()
         uniqueSessions.add(hostSession)
         uniqueSessions.forEach { try { it.send(Frame.Text(text)) } catch(e: Exception) {} }
@@ -46,30 +62,42 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
 
     suspend fun updateHostPlayerCount() {
         val msg = GameMessage(MessageType.PLAYER_COUNT, "Server", "${players.size}")
-        try { hostSession.send(Frame.Text(Gson().toJson(msg))) } catch(e: Exception) {}
+        try { hostSession.send(Frame.Text(gson.toJson(msg))) } catch(e: Exception) {}
     }
 }
 
-val rooms = ConcurrentHashMap<String, GameRoom>()
-val registeredUsers = ConcurrentHashMap<String, Boolean>()
-val friendsMap = ConcurrentHashMap<String, MutableSet<String>>()
-val requestsMap = ConcurrentHashMap<String, MutableSet<String>>() // Target -> Set of Requesters
-val onlineUsers = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
+fun loadData() {
+    val file = File(DATA_FILE)
+    if (file.exists()) {
+        try {
+            val json = file.readText()
+            globalData = gson.fromJson(json, ServerData::class.java)
+        } catch (e: Exception) { e.printStackTrace() }
+    }
+}
+
+fun saveData() {
+    try {
+        val json = gson.toJson(globalData)
+        File(DATA_FILE).writeText(json)
+    } catch (e: Exception) { e.printStackTrace() }
+}
 
 fun main() {
+    loadData()
     val port = System.getenv("PORT")?.toInt() ?: 8080
     embeddedServer(Netty, port = port, host = "0.0.0.0") {
         install(WebSockets)
         routing {
             webSocket("/ws") {
                 val versionMsg = GameMessage(MessageType.VERSION_CHECK, "Server", "$LATEST_VERSION_CODE|$UPDATE_URL|$LATEST_VERSION_NAME")
-                try { send(Frame.Text(Gson().toJson(versionMsg))) } catch(e: Exception) {}
+                try { send(Frame.Text(gson.toJson(versionMsg))) } catch(e: Exception) {}
 
                 try {
                     for (frame in incoming) {
                         if (frame is Frame.Text) {
                             val text = frame.readText()
-                            val msg = Gson().fromJson(text, GameMessage::class.java)
+                            val msg = gson.fromJson(text, GameMessage::class.java)
                             handleMessage(this, msg)
                         }
                     }
@@ -99,16 +127,14 @@ fun main() {
 }
 
 suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessage) {
-    val gson = Gson()
     when (msg.type) {
         MessageType.REGISTER -> {
             val name = msg.content ?: return
-            if (registeredUsers.containsKey(name)) {
+            if (globalData.users.contains(name)) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "TAKEN"))))
             } else {
-                registeredUsers[name] = true
-                friendsMap[name] = mutableSetOf()
-                requestsMap[name] = mutableSetOf()
+                globalData.users.add(name)
+                saveData()
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "OK"))))
             }
         }
@@ -123,12 +149,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.ADD_FRIEND -> {
             val user = msg.sender
             val target = msg.content ?: return
-            if (registeredUsers.containsKey(target)) {
-                if (friendsMap[user]?.contains(target) == true) {
+            if (globalData.users.contains(target)) {
+                if (globalData.friends[user]?.contains(target) == true) {
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Είναι ήδη φίλος σου!"))))
                     return
                 }
-                requestsMap.getOrPut(target) { mutableSetOf() }.add(user)
+                globalData.requests.getOrPut(target) { mutableSetOf() }.add(user)
+                saveData()
                 val targetSession = onlineUsers[target]
                 if (targetSession != null) sendRequestList(target, targetSession)
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε!"))))
@@ -137,11 +164,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
         }
         MessageType.ACCEPT_REQUEST -> {
-            val user = msg.sender // The one who was requested
+            val user = msg.sender
             val requester = msg.content ?: return
-            requestsMap[user]?.remove(requester)
-            friendsMap.getOrPut(user) { mutableSetOf() }.add(requester)
-            friendsMap.getOrPut(requester) { mutableSetOf() }.add(user)
+            globalData.requests[user]?.remove(requester)
+            globalData.friends.getOrPut(user) { mutableSetOf() }.add(requester)
+            globalData.friends.getOrPut(requester) { mutableSetOf() }.add(user)
+            saveData()
             sendFriendList(user, session)
             sendRequestList(user, session)
             val reqSession = onlineUsers[requester]
@@ -150,20 +178,29 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.REJECT_REQUEST -> {
             val user = msg.sender
             val requester = msg.content ?: return
-            requestsMap[user]?.remove(requester)
+            globalData.requests[user]?.remove(requester)
+            saveData()
             sendRequestList(user, session)
         }
-        MessageType.INVITE -> {
+        MessageType.CHALLENGE_FRIEND -> {
             val host = msg.sender
-            val target = msg.content ?: return
+            val target = msg.content ?: return // target name
             val targetSession = onlineUsers[target]
             if (targetSession != null) {
-                val room = rooms.values.find { it.hostSession == session }
-                if (room != null) {
-                    targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.INVITE_RECEIVED, "Server", "$host|${room.code}"))))
-                } else {
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Πρέπει να είσαι σε δωμάτιο για να καλέσεις!"))))
-                }
+                // We send a specific message to target. Content could be a random seed.
+                val seed = (1..99999).random().toString()
+                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", "$host|$seed"))))
+            }
+        }
+        MessageType.CHALLENGE_RESULT -> {
+            // content = "target_name|score|progress"
+            val parts = msg.content?.split("|") ?: return
+            val target = parts[0]
+            val score = parts[1]
+            val progress = parts[2]
+            val targetSession = onlineUsers[target]
+            if (targetSession != null) {
+                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RESULT, "Server", "${msg.sender}|$score|$progress"))))
             }
         }
         MessageType.CREATE_ROOM -> {
@@ -219,19 +256,19 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 }
 
 suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession) {
-    val friends = friendsMap[user] ?: return
+    val friends = globalData.friends[user] ?: return
     val infoList = friends.map { FriendInfo(it, onlineUsers.containsKey(it)) }
-    session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.FRIEND_LIST, "Server", Gson().toJson(infoList)))))
+    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.FRIEND_LIST, "Server", gson.toJson(infoList)))))
 }
 
 suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession) {
-    val requesters = requestsMap[user] ?: return
-    session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.REQUEST_LIST, "Server", Gson().toJson(requesters.toList())))))
+    val requesters = globalData.requests[user] ?: return
+    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters.toList())))))
 }
 
 suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
     onlineUsers.forEach { (name, session) ->
-        if (friendsMap[name]?.contains(user) == true) {
+        if (globalData.friends[name]?.contains(user) == true) {
             sendFriendList(name, session)
         }
     }
@@ -280,13 +317,12 @@ suspend fun runGameLoop(room: GameRoom) {
         room.isGameRunning = false
         room.players.forEach { p ->
             val resultMsg = if (p.name == winner?.name) "ΜΠΡΑΒΟ ΜΠΟΙ ΝΙΚΗΣΕΣ" else "ΔΕΝ ΠΕΙΡΑΖΕΙ , ΑΛΛΗ ΜΙΑ ΗΤΤΑ ΣΤΗΝ ΖΩΗ ΣΟΥ"
-            try { p.session.send(Frame.Text(Gson().toJson(GameMessage(MessageType.GAME_OVER, "Server", "$resultMsg\n\nΚΑΤΑΤΑΞΗ:\n$rankingText")))) } catch(e: Exception) {}
+            try { p.session.send(Frame.Text(gson.toJson(GameMessage(MessageType.GAME_OVER, "Server", "$resultMsg\n\nΚΑΤΑΤΑΞΗ:\n$rankingText")))) } catch(e: Exception) {}
         }
     }
 }
 
 suspend fun sendQuestionAndWait(room: GameRoom, question: Map<String, Any>) {
-    val gson = Gson()
     val correctIdx = (question["correctAnswerIndex"] as Double).toInt()
     room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
     room.waitingForAnswers = true
