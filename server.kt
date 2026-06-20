@@ -245,10 +245,19 @@ suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession)
 suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession) {
     if (!::database.isInitialized) return
     val requestsColl = database.getCollection<Map<String, Any>>("requests")
-    val doc = requestsColl.find(Filters.eq("target", user)).firstOrNull()
-    val requesters = (doc?.get("requesters") as? List<*>)?.map { it.toString() } ?: emptyList()
-    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters)))))
+
+    // Διαβάζουμε τη λίστα από τη MongoDB
+    val docs = requestsColl.find(com.google.android.gms.drive.query.Filters.eq("target", user)).toList()
+    val doc = docs.firstOrNull()
+
+    // Μετατρέπουμε τα δεδομένα σε λίστα ονομάτων
+    val requesters = (doc?.get("requesters") as? List<*>)?.map { it.toString() } ?: java.util.Collections.emptyList()
+
+    // Τη στέλνουμε στο κινητό
+    val msg = GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters))
+    session.send(Frame.Text(gson.toJson(msg)))
 }
+
 
 suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
     if (!::database.isInitialized) return
