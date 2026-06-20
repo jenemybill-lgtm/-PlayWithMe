@@ -1,14 +1,18 @@
 plugins {
-    id("org.jetbrains.kotlin.jvm") version "1.9.10"
-    id("io.ktor.plugin") version "2.3.5"
+    kotlin("jvm") version "1.9.10"
     id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
-group = "com.example"
-version = "0.0.1"
-
 repositories {
     mavenCentral()
+}
+
+sourceSets {
+    main {
+        kotlin {
+            setSrcDirs(listOf("."))
+        }
+    }
 }
 
 dependencies {
@@ -22,11 +26,8 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:1.4.11")
 }
 
-kotlin {
-    jvmToolchain(17)
-}
-
-  application {
-        mainClass.set("ServerKt") 
+tasks.withType<Jar> {
+    manifest {
+        attributes["Main-Class"] = "ServerKt"
     }
-    
+}
