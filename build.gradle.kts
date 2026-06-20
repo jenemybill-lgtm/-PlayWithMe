@@ -7,6 +7,7 @@ repositories {
     mavenCentral()
 }
 
+// Αυτή η εντολή λέει στο Render: "Κοίτα στην αρχική σελίδα, εκεί είναι ο κώδικας!"
 sourceSets {
     main {
         kotlin {
@@ -26,7 +27,7 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:1.4.11")
 }
 
-tasks.withType<Jar> {
+tasks.jar {
     manifest {
         attributes["Main-Class"] = "ServerKt"
     }
