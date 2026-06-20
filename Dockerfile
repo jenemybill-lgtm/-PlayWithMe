@@ -9,5 +9,5 @@ FROM eclipse-temurin:17-jre
 EXPOSE 8080
 RUN mkdir /app
 # Προσοχή: Εδώ διορθώνουμε τη διαδρομή για να βρει το αρχείο
-COPY --from=build /home/gradle/src/build/libs/*.jar /app/server.jar
+COPY --from=build /home/gradle/src/build/libs/server-all.jar /app/server.jar
 CMD ["java", "-jar", "/app/server.jar"]
