@@ -22,7 +22,12 @@ dependencies {
     implementation "io.ktor:ktor-server-content-negotiation:2.3.5"
     implementation "io.ktor:ktor-serialization-gson:2.3.5"
     implementation "com.google.code.gson:gson:2.10.1"
+    
+    // MongoDB & Coroutines
     implementation "org.mongodb:mongodb-driver-kotlin-coroutine:4.11.0"
+    implementation "org.mongodb:bson:4.11.0"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3"
+
     implementation "ch.qos.logback:logback-classic:1.4.11"
 }
 
