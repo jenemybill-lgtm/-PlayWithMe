@@ -1,0 +1,36 @@
+plugins {
+    id 'org.jetbrains.kotlin.jvm' version '1.9.10'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+repositories {
+    mavenCentral()
+}
+
+sourceSets {
+    main {
+        kotlin {
+            srcDirs = ['.']
+        }
+    }
+}
+
+dependencies {
+    implementation "io.ktor:ktor-server-core:2.3.5"
+    implementation "io.ktor:ktor-server-netty:2.3.5"
+    implementation "io.ktor:ktor-server-websockets:2.3.5"
+    implementation "io.ktor:ktor-server-content-negotiation:2.3.5"
+    implementation "io.ktor:ktor-serialization-gson:2.3.5"
+    implementation "com.google.code.gson:gson:2.10.1"
+    implementation "org.mongodb:mongodb-driver-kotlin-coroutine:4.11.0"
+    implementation "ch.qos.logback:logback-classic:1.4.11"
+}
+
+shadowJar {
+    archiveBaseName.set('server')
+    archiveClassifier.set('all')
+    archiveVersion.set('')
+    manifest {
+        attributes 'Main-Class': 'ServerKt'
+    }
+}
