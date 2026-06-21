@@ -140,7 +140,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             onlineUsers[officialName] = session
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
             
-            // CRITICAL SYNC
             sendFriendList(officialName, session)
             sendRequestList(officialName, session)
             notifyFriendsStatus(officialName, true)
@@ -246,7 +245,7 @@ suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession
         val requestsColl = database.getCollection<Document>("requests")
         val doc = requestsColl.find(Filters.regex("target", "^${Pattern.quote(user)}$", "i")).toList().firstOrNull()
         val rawRequesters = doc?.get("requesters", List::class.java)
-        val requesters = rawReqs?.map { it.toString() } ?: emptyList()
+        val requesters = rawRequesters?.map { it.toString() } ?: emptyList()
         
         println("SERVER: Found ${requesters.size} requests for $user")
         val msg = GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters))
