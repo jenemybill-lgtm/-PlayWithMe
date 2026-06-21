@@ -10,18 +10,27 @@ import com.mongodb.client.model.Filters
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.Updates
 import com.mongodb.kotlin.client.coroutine.MongoClient
+import com.mongodb.kotlin.client.coroutine.MongoCollection
 import com.mongodb.kotlin.client.coroutine.MongoDatabase
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.toList
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.regex.Pattern
 
-// --- CONFIGURATION v2.0 ---
+// --- CONFIGURATION v2.1 ---
 const val LATEST_VERSION_NAME = "2.0"
 const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
-const val MONGODB_URI = "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
+
+// ΠΡΟΣΟΧΗ ΑΣΦΑΛΕΙΑΣ: Άλλαξε το password στο Mongo Atlas ΑΜΕΣΩΣ (ήταν hardcoded σε αυτό το αρχείο).
+// Μετά βάλε τη νέα σύνδεση ως env var "MONGODB_URI" στο hosting σου (π.χ. Railway -> Variables).
+// Το fallback string παρακάτω είναι ΜΟΝΟ για να μη σταματήσει να δουλεύει το deployment σου
+// μέχρι να ρυθμίσεις το env var· σβήσε το μόλις το κάνεις.
+val MONGODB_URI = System.getenv("MONGODB_URI")
+    ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
 enum class MessageType {
     CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT, VERSION_CHECK,
@@ -40,7 +49,8 @@ val gson = Gson()
 lateinit var database: MongoDatabase
 
 class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession) {
-    val players = mutableListOf<Player>()
+    // CopyOnWriteArrayList: ασφαλές σε ταυτόχρονη πρόσβαση από πολλά coroutines (join/answer/disconnect ταυτόχρονα)
+    val players = CopyOnWriteArrayList<Player>()
     var questions: List<Map<String, Any>> = emptyList()
     var currentQuestionIndex = 0
     var timerSeconds = 20
@@ -95,9 +105,11 @@ fun main() {
                 }
 
                 val roomsToClose = mutableListOf<String>()
+                // Σημείωση: αυτό είναι το inline kotlin.collections.forEach (όχι το Java BiConsumer forEach),
+                // οπότε μπορούμε να καλέσουμε suspend functions απευθείας, χωρίς runBlocking.
                 rooms.forEach { (code, room) ->
                     if (room.hostSession == this || room.players.any { it.session == this }) {
-                        runBlocking { room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποχώρησε. Το δωμάτιο έκλεισε.")) }
+                        room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποχώρησε. Το δωμάτιο έκλεισε."))
                         roomsToClose.add(code)
                     }
                 }
@@ -105,6 +117,13 @@ fun main() {
             }
         }
     }.start(wait = true)
+}
+
+// Βρίσκει το "επίσημο" (canonical) cased όνομα από τη usersColl, ώστε όλες οι συλλογές
+// (friends/requests/onlineUsers) να αποθηκεύουν πάντα την ΙΔΙΑ ακριβή γραφή ονόματος.
+suspend fun canonicalName(usersColl: MongoCollection<Map<String, Any>>, raw: String): String {
+    val doc = usersColl.find(Filters.regex("name", "^${Pattern.quote(raw)}$", "i")).toList().firstOrNull()
+    return if (doc != null) doc["name"] as String else raw
 }
 
 suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessage) {
@@ -117,54 +136,72 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
     when (msg.type) {
         MessageType.LOGIN -> {
             val name = msg.content?.trim() ?: return
-            val userDoc = usersColl.find(Filters.regex("name", "^$name$", "i")).toList().firstOrNull()
-            val officialName = if (userDoc != null) userDoc["name"] as String else name
-            
+            val officialName = canonicalName(usersColl, name)
+
             onlineUsers[officialName] = session
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
-            
+
             sendFriendList(officialName, session)
             sendRequestList(officialName, session)
             notifyFriendsStatus(officialName, true)
-            
-            pendingColl.find(Filters.regex("target", "^$officialName$", "i")).toList().forEach { doc ->
+
+            pendingColl.find(Filters.regex("target", "^${Pattern.quote(officialName)}$", "i")).toList().forEach { doc ->
                 try {
                     val type = MessageType.valueOf(doc["type"] as String)
                     session.send(Frame.Text(gson.toJson(GameMessage(type, "Server", doc["content"] as String))))
                 } catch (e: Exception) {}
             }
-            pendingColl.deleteMany(Filters.regex("target", "^$officialName$", "i"))
+            pendingColl.deleteMany(Filters.regex("target", "^${Pattern.quote(officialName)}$", "i"))
         }
 
         MessageType.REGISTER -> {
             val name = msg.content?.trim() ?: return
-            if (usersColl.countDocuments(Filters.eq("name", name)) == 0L) {
+            // Case-insensitive έλεγχος μοναδικότητας, ώστε να μη δημιουργούνται διπλοί λογαριασμοί
+            // "Bob"/"bob" που μπερδεύουν το LOGIN (το οποίο είναι ήδη case-insensitive).
+            if (usersColl.countDocuments(Filters.regex("name", "^${Pattern.quote(name)}$", "i")) == 0L) {
                 usersColl.insertOne(mapOf("name" to name))
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "OK"))))
             } else { session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "TAKEN")))) }
         }
 
         MessageType.ADD_FRIEND -> {
-            val user = msg.sender.trim(); val target = msg.content?.trim() ?: return
+            val rawUser = msg.sender.trim(); val target = msg.content?.trim() ?: return
+            val user = canonicalName(usersColl, rawUser)
             println("SERVER: Friend request from $user to $target")
-            
-            val targetDoc = usersColl.find(Filters.regex("name", "^$target$", "i")).toList().firstOrNull()
+
+            val targetDoc = usersColl.find(Filters.regex("name", "^${Pattern.quote(target)}$", "i")).toList().firstOrNull()
 
             if (targetDoc != null) {
                 val officialTarget = targetDoc["name"] as String
+
+                if (user.equals(officialTarget, ignoreCase = true)) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν μπορείς να προσθέσεις τον εαυτό σου!"))))
+                    return
+                }
+
                 if (friendsColl.countDocuments(Filters.and(Filters.eq("user", user), Filters.eq("friend", officialTarget))) > 0L) {
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Είναι ήδη φίλος σου!"))))
                     return
                 }
-                
-                // SAVE REQUEST (Case-insensitive target update)
-                requestsColl.updateOne(Filters.regex("target", "^$officialTarget$", "i"), Updates.addToSet("requesters", user), UpdateOptions().upsert(true))
 
-                // FORCE-PUSH IF ONLINE: Immediate notification
+                // ΔΙΟΡΘΩΣΗ ΤΟΥ ΚΥΡΙΟΥ BUG:
+                // Με Filters.regex στο upsert filter, η Mongo ΔΕΝ ξέρει τι target να βάλει σε νέο document
+                // (αυτό συμβαίνει μόνο με Filters.eq), οπότε το νέο document έβγαινε ΧΩΡΙΣ πεδίο "target".
+                // Με Updates.setOnInsert το ορίζουμε ρητά, ώστε να βρίσκεται πάντα μετά στο sendRequestList.
+                requestsColl.updateOne(
+                    Filters.regex("target", "^${Pattern.quote(officialTarget)}$", "i"),
+                    Updates.combine(
+                        Updates.addToSet("requesters", user),
+                        Updates.setOnInsert("target", officialTarget)
+                    ),
+                    UpdateOptions().upsert(true)
+                )
+
+                // Άμεση ειδοποίηση αν ο target είναι online (inline forEach -> δεν χρειάζεται runBlocking)
                 onlineUsers.entries.forEach { (onlineName, sess) ->
                     if (onlineName.equals(officialTarget, ignoreCase = true)) {
-                        runBlocking { sendRequestList(onlineName, sess) }
-                        runBlocking { sess.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!")))) }
+                        sendRequestList(onlineName, sess)
+                        sess.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
                     }
                 }
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε στον $officialTarget!"))))
@@ -172,15 +209,34 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.ACCEPT_REQUEST -> {
-            val user = msg.sender.trim(); val requester = msg.content?.trim() ?: return
-            requestsColl.updateOne(Filters.regex("target", "^$user$", "i"), Updates.pull("requesters", requester))
+            val rawUser = msg.sender.trim(); val rawRequester = msg.content?.trim() ?: return
+            val user = canonicalName(usersColl, rawUser)
+            val requester = canonicalName(usersColl, rawRequester)
+
+            requestsColl.updateOne(Filters.regex("target", "^${Pattern.quote(user)}$", "i"), Updates.pull("requesters", requester))
             friendsColl.insertOne(mapOf("user" to user, "friend" to requester))
             friendsColl.insertOne(mapOf("user" to requester, "friend" to user))
-            sendFriendList(user, session); onlineUsers.entries.find { it.key.equals(requester, ignoreCase = true) }?.let { sendFriendList(it.key, it.value); sendRequestList(it.key, it.value) }
+            sendFriendList(user, session)
+            sendRequestList(user, session)
+            onlineUsers.entries.find { it.key.equals(requester, ignoreCase = true) }?.let { sendFriendList(it.key, it.value); sendRequestList(it.key, it.value) }
+        }
+
+        MessageType.REJECT_REQUEST -> {
+            // Αυτό το case έλειπε εντελώς -> ένα REJECT_REQUEST από τον client έπεφτε στο "else -> {}"
+            // και δεν έκανε ποτέ τίποτα, οπότε το αίτημα έμενε για πάντα στη λίστα.
+            val rawUser = msg.sender.trim(); val rawRequester = msg.content?.trim() ?: return
+            val user = canonicalName(usersColl, rawUser)
+            val requester = canonicalName(usersColl, rawRequester)
+
+            requestsColl.updateOne(Filters.regex("target", "^${Pattern.quote(user)}$", "i"), Updates.pull("requesters", requester))
+            sendRequestList(user, session)
         }
 
         MessageType.CREATE_ROOM -> {
-            val code = (10000..99999).random().toString()
+            // Έλεγχος ώστε να μην ξαναχρησιμοποιηθεί κωδικός δωματίου που ήδη υπάρχει
+            var code: String
+            do { code = (10000..99999).random().toString() } while (rooms.containsKey(code))
+
             val room = GameRoom(code, session)
             room.players.add(Player(msg.sender, session))
             rooms[code] = room
@@ -202,18 +258,18 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.START_GAME -> {
             val room = rooms.values.find { it.hostSession == session }
             if (room != null && msg.content != null) {
-                // --- CANCEL PREVIOUS LOOP IF EXISTS ---
+                // --- ΑΚΥΡΩΣΗ ΠΡΟΗΓΟΥΜΕΝΟΥ LOOP ΑΝ ΥΠΑΡΧΕΙ ---
                 room.gameJob?.cancel()
-                
+
                 val setup: Map<String, Any> = gson.fromJson(msg.content, object : TypeToken<Map<String, Any>>() {}.type)
                 room.questions = setup["questions"] as List<Map<String, Any>>
                 room.timerSeconds = (setup["timer"] as Double).toInt()
-                
-                // --- HARD RESET FOR REUSE ---
+
+                // --- HARD RESET ΓΙΑ ΕΠΑΝΑΧΡΗΣΗ ---
                 room.isGameRunning = true
                 room.currentQuestionIndex = 0
                 room.waitingForAnswers = false
-                room.players.forEach { 
+                room.players.forEach {
                     it.score = 0
                     it.totalTime = 0
                     it.hasAnswered = false
@@ -278,13 +334,11 @@ suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession
     if (!::database.isInitialized) return
     try {
         val requestsColl = database.getCollection<Map<String, Any>>("requests")
-        // CASE-INSENSITIVE SCAN (Fixes fotakimou issue)
-        val doc = requestsColl.find(Filters.regex("target", "^$user$", "i")).toList().firstOrNull()
-        
+        val doc = requestsColl.find(Filters.regex("target", "^${Pattern.quote(user)}$", "i")).toList().firstOrNull()
+
         val rawRequesters = doc?.get("requesters") as? List<*>
-        // ROBUST MAPPING: Ensure everything is a clean String for the App
         val requesters = rawRequesters?.mapNotNull { it?.toString() } ?: emptyList()
-        
+
         println("SERVER: Found ${requesters.size} requests for $user: $requesters")
         val msg = GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters))
         session.send(Frame.Text(gson.toJson(msg)))
