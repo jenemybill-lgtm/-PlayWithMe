@@ -22,6 +22,7 @@ const val LATEST_VERSION_NAME = "2.0"
 const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 const val MONGODB_URI = "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
+// ---------------------
 
 enum class MessageType {
     CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT, VERSION_CHECK,
@@ -37,6 +38,7 @@ data class FriendInfo(val name: String, var isOnline: Boolean)
 val onlineUsers = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
 val rooms = ConcurrentHashMap<String, GameRoom>()
 val gson = Gson()
+
 lateinit var database: MongoDatabase
 
 class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession) {
@@ -51,33 +53,47 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
         val text = gson.toJson(message)
         val sessions = players.map { it.session }.toMutableSet()
         sessions.add(hostSession)
-        sessions.forEach { try { it.send(Frame.Text(text)) } catch(e: Exception) {} }
+        sessions.forEach { 
+            try { 
+                it.send(Frame.Text(text)) 
+            } catch(e: Exception) {
+                println("BROADCAST ERROR: Failed to reach a session")
+            } 
+        }
     }
 
     suspend fun updateHostPlayerCount() {
         val msg = GameMessage(MessageType.PLAYER_COUNT, "Server", "${players.size}")
-        try { hostSession.send(Frame.Text(gson.toJson(msg))) } catch(e: Exception) {}
+        try { 
+            hostSession.send(Frame.Text(gson.toJson(msg))) 
+        } catch(e: Exception) {}
     }
 }
 
 suspend fun initDatabase() {
     try {
-        println("SERVER: Connecting to MongoDB...")
+        println("Connecting to MongoDB...")
         val client = MongoClient.create(MONGODB_URI)
         database = client.getDatabase("playwithme")
-        println("SERVER: CONNECTED TO MONGODB ATLAS")
-    } catch (e: Exception) { println("SERVER DATABASE ERROR: ${e.message}") }
+        println("Connected to MongoDB Atlas successfully!")
+    } catch (e: Exception) {
+        println("CRITICAL: MongoDB Connection Error: ${e.message}")
+    }
 }
 
 fun main() {
     GlobalScope.launch { initDatabase() }
     val port = System.getenv("PORT")?.toInt() ?: 8080
-    println("SERVER: Starting on port $port")
+    println("Starting server on port $port...")
     embeddedServer(Netty, port = port, host = "0.0.0.0") {
         install(WebSockets)
         routing {
             webSocket("/ws") {
-                send(Frame.Text(gson.toJson(GameMessage(MessageType.VERSION_CHECK, "Server", "$LATEST_VERSION_CODE|$UPDATE_URL|$LATEST_VERSION_NAME"))))
+                // Safety Lock: Push version info immediately
+                try {
+                    val versionMsg = GameMessage(MessageType.VERSION_CHECK, "Server", "$LATEST_VERSION_CODE|$UPDATE_URL|$LATEST_VERSION_NAME")
+                    send(Frame.Text(gson.toJson(versionMsg)))
+                } catch(e: Exception) {}
 
                 try {
                     for (frame in incoming) {
@@ -87,12 +103,15 @@ fun main() {
                             handleMessage(this, msg)
                         }
                     }
-                } catch (e: Exception) { println("SERVER SOCKET ERROR: ${e.message}") }
+                } catch (e: Exception) {
+                    println("WS ERROR: ${e.message}")
+                }
 
+                // --- CLEANUP SAFETY LOCK ---
                 var disconnectedUser: String? = null
                 onlineUsers.forEach { (name, session) -> if (session == this) disconnectedUser = name }
                 if (disconnectedUser != null) {
-                    println("SERVER: User $disconnectedUser disconnected")
+                    println("User $disconnectedUser disconnected")
                     onlineUsers.remove(disconnectedUser)
                     notifyFriendsStatus(disconnectedUser!!, false)
                 }
@@ -100,7 +119,7 @@ fun main() {
                 val roomsToClose = mutableListOf<String>()
                 rooms.forEach { (code, room) ->
                     if (room.hostSession == this || room.players.any { it.session == this }) {
-                        runBlocking { room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποσυνδέθηκε.")) }
+                        runBlocking { room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποσυνδέθηκε. Το δωμάτιο έκλεισε.")) }
                         roomsToClose.add(code)
                     }
                 }
@@ -112,9 +131,12 @@ fun main() {
 
 suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessage) {
     if (!::database.isInitialized) {
-        println("SERVER: Database not initialized yet!")
+        try {
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Database connecting..."))))
+        } catch(e: Exception) {}
         return
     }
+
     val usersColl = database.getCollection<Map<String, Any>>("users")
     val friendsColl = database.getCollection<Map<String, Any>>("friends")
     val requestsColl = database.getCollection<Map<String, Any>>("requests")
@@ -123,71 +145,88 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
     when (msg.type) {
         MessageType.LOGIN -> {
             val name = msg.content?.trim() ?: return
-            println("SERVER: Login request from $name")
+            println("Login: $name")
             onlineUsers[name] = session
-            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
             
-            // Sync Friends and Requests
-            sendFriendList(name, session)
-            sendRequestList(name, session)
-            notifyFriendsStatus(name, true)
-            
-            // Deliver Pending (Offline) messages
-            pendingColl.find(Filters.eq("target", name)).toList().forEach { doc ->
-                try {
-                    val type = MessageType.valueOf(doc["type"] as String)
-                    session.send(Frame.Text(gson.toJson(GameMessage(type, "Server", doc["content"] as String))))
-                } catch (e: Exception) {}
+            // Safety Lock: Always push current state on login
+            try {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
+                sendFriendList(name, session)
+                sendRequestList(name, session)
+                notifyFriendsStatus(name, true)
+                
+                // Deliver all missed messages
+                pendingColl.find(Filters.eq("target", name)).toList().forEach { doc ->
+                    val type = doc["type"] as String
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.valueOf(type), "Server", doc["content"] as String))))
+                }
+                pendingColl.deleteMany(Filters.eq("target", name))
+            } catch(e: Exception) {
+                println("LOGIN ERROR for $name: ${e.message}")
             }
-            pendingColl.deleteMany(Filters.eq("target", name))
         }
 
         MessageType.REGISTER -> {
             val name = msg.content?.trim() ?: return
-            if (usersColl.countDocuments(Filters.eq("name", name)) == 0L) {
+            val count = usersColl.countDocuments(Filters.eq("name", name))
+            if (count > 0) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "TAKEN"))))
+            } else {
                 usersColl.insertOne(mapOf("name" to name))
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "OK"))))
-                println("SERVER: User $name registered")
-            } else { session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "TAKEN")))) }
+            }
         }
 
         MessageType.ADD_FRIEND -> {
             val user = msg.sender.trim()
             val target = msg.content?.trim() ?: return
-            println("SERVER: $user wants to add $target")
+            println("Friend Request: $user -> $target")
             
-            if (usersColl.countDocuments(Filters.eq("name", target)) > 0L) {
+            val targetExists = usersColl.countDocuments(Filters.eq("name", target))
+            if (targetExists > 0) {
                 // Check if already friends
-                if (friendsColl.countDocuments(Filters.and(Filters.eq("user", user), Filters.eq("friend", target))) > 0L) {
+                val isAlreadyFriend = friendsColl.countDocuments(Filters.and(Filters.eq("user", user), Filters.eq("friend", target)))
+                if (isAlreadyFriend > 0) {
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Είναι ήδη φίλος σου!"))))
                     return
                 }
-                
-                // Add to MongoDB requests collection
-                requestsColl.updateOne(Filters.eq("target", target), Updates.addToSet("requesters", user), UpdateOptions().upsert(true))
-                println("SERVER: Request from $user to $target saved in DB")
 
-                // Notify target if online
-                onlineUsers[target]?.let { targetSession ->
+                // Add to MongoDB
+                requestsColl.updateOne(Filters.eq("target", target), Updates.addToSet("requesters", user), UpdateOptions().upsert(true))
+                
+                // Safety Lock: Immediate push if online, else DB persists it
+                val targetSession = onlineUsers[target]
+                if (targetSession != null) {
                     sendRequestList(target, targetSession)
                     targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
-                    println("SERVER: Notified $target about the new request")
                 }
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε!"))))
-            } else { 
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο παίκτης $target δεν βρέθηκε!")))) 
-                println("SERVER: User $target not found in database")
+            } else {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο παίκτης δεν βρέθηκε!"))))
             }
         }
 
         MessageType.ACCEPT_REQUEST -> {
-            val user = msg.sender.trim(); val requester = msg.content?.trim() ?: return
-            println("SERVER: $user accepted request from $requester")
+            val user = msg.sender.trim()
+            val requester = msg.content?.trim() ?: return
             requestsColl.updateOne(Filters.eq("target", user), Updates.pull("requesters", requester))
             friendsColl.insertOne(mapOf("user" to user, "friend" to requester))
             friendsColl.insertOne(mapOf("user" to requester, "friend" to user))
+            
+            // Safety Lock: Sync both parties immediately
             sendFriendList(user, session)
-            onlineUsers[requester]?.let { sendFriendList(requester, it); sendRequestList(requester, it) }
+            sendRequestList(user, session)
+            onlineUsers[requester]?.let { 
+                sendFriendList(requester, it) 
+                sendRequestList(requester, it)
+            }
+        }
+
+        MessageType.REJECT_REQUEST -> {
+            val user = msg.sender.trim()
+            val requester = msg.content?.trim() ?: return
+            requestsColl.updateOne(Filters.eq("target", user), Updates.pull("requesters", requester))
+            sendRequestList(user, session)
         }
 
         MessageType.CREATE_ROOM -> {
@@ -197,19 +236,17 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             rooms[code] = room
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.JOIN_RESPONSE, "Server", code))))
             room.updateHostPlayerCount()
-            println("SERVER: Room $code created by ${msg.sender}")
         }
 
         MessageType.JOIN -> {
             val room = rooms[msg.content]
             if (room != null) {
-                if (room.players.none { it.name == msg.sender }) {
+                if (room.players.none { it.session == session }) {
                     room.players.add(Player(msg.sender, session))
                 }
                 room.broadcast(GameMessage(MessageType.JOIN_RESPONSE, "Server", room.code))
                 room.updateHostPlayerCount()
-                println("SERVER: ${msg.sender} joined room ${room.code}")
-            } else { session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το δωμάτιο δεν βρέθηκε!")))) }
+            }
         }
 
         MessageType.START_GAME -> {
@@ -220,6 +257,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 room.timerSeconds = (setup["timer"] as Double).toInt()
                 room.isGameRunning = true
                 room.currentQuestionIndex = 0
+                // RESET STATE FOR REUSE
                 room.players.forEach { 
                     it.score = 0
                     it.totalTime = 0
@@ -228,7 +266,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 }
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
                 CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
-                println("SERVER: Game started in room ${room.code}")
             }
         }
 
@@ -245,26 +282,43 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.INVITE -> {
-            val target = msg.content ?: return; val room = rooms.values.find { it.hostSession == session }
+            val host = msg.sender
+            val target = msg.content ?: return
+            val room = rooms.values.find { it.hostSession == session }
             if (room != null) {
-                val inviteStr = "${msg.sender}|${room.code}"
-                onlineUsers[target]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.INVITE_RECEIVED, "Server", inviteStr))))
-                    ?: pendingColl.insertOne(mapOf("target" to target, "type" to "INVITE_RECEIVED", "content" to inviteStr))
-                println("SERVER: Invitation from ${msg.sender} to $target sent")
+                val inviteStr = "$host|${room.code}"
+                val targetSession = onlineUsers[target]
+                if (targetSession != null) {
+                    targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.INVITE_RECEIVED, "Server", inviteStr))))
+                } else {
+                    pendingColl.insertOne(mapOf("target" to target, "type" to "INVITE_RECEIVED", "content" to inviteStr))
+                }
             }
         }
 
         MessageType.CHALLENGE_FRIEND -> {
-            val target = msg.content ?: return; val challengeStr = "${msg.sender}|${(1..99999).random()}"
-            onlineUsers[target]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
-                ?: pendingColl.insertOne(mapOf("target" to target, "type" to "CHALLENGE_RECEIVED", "content" to challengeStr))
-            println("SERVER: Challenge from ${msg.sender} to $target sent")
+            val host = msg.sender
+            val target = msg.content ?: return
+            val seed = (1..99999).random().toString()
+            val challengeStr = "$host|$seed"
+            val targetSession = onlineUsers[target]
+            if (targetSession != null) {
+                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
+            } else {
+                pendingColl.insertOne(mapOf("target" to target, "type" to "CHALLENGE_RECEIVED", "content" to challengeStr))
+            }
         }
 
         MessageType.CHALLENGE_RESULT -> {
-            val target = msg.content?.split("|")?.get(0) ?: return
-            onlineUsers[target]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RESULT, "Server", msg.content))))
-                ?: pendingColl.insertOne(mapOf("target" to target, "type" to "CHALLENGE_RESULT", "content" to msg.content))
+            val parts = msg.content?.split("|") ?: return
+            val target = parts[0]
+            val resStr = "${msg.sender}|${parts[1]}|${parts[2]}"
+            val targetSession = onlineUsers[target]
+            if (targetSession != null) {
+                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RESULT, "Server", resStr))))
+            } else {
+                pendingColl.insertOne(mapOf("target" to target, "type" to "CHALLENGE_RESULT", "content" to resStr))
+            }
         }
         else -> {}
     }
@@ -272,7 +326,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
 suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession) {
     if (!::database.isInitialized) return
-    val friends = database.getCollection<Map<String, Any>>("friends").find(Filters.eq("user", user)).toList().map { doc ->
+    val friendsColl = database.getCollection<Map<String, Any>>("friends")
+    val friends = friendsColl.find(Filters.eq("user", user)).toList().map { doc ->
         val fName = doc["friend"] as String
         FriendInfo(fName, onlineUsers.containsKey(fName))
     }
@@ -281,16 +336,17 @@ suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession)
 
 suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession) {
     if (!::database.isInitialized) return
-    println("SERVER: Scanning database for requests to user: $user")
-    val doc = database.getCollection<Map<String, Any>>("requests").find(Filters.eq("target", user)).toList().firstOrNull()
+    val requestsColl = database.getCollection<Map<String, Any>>("requests")
+    val doc = requestsColl.find(Filters.eq("target", user)).toList().firstOrNull()
     val requesters = (doc?.get("requesters") as? List<*>)?.map { it.toString() } ?: emptyList()
-    println("SERVER: Found ${requesters.size} requests for $user")
-    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters)))))
+    val msg = GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters))
+    session.send(Frame.Text(gson.toJson(msg)))
 }
 
 suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
     if (!::database.isInitialized) return
-    database.getCollection<Map<String, Any>>("friends").find(Filters.eq("friend", user)).toList().forEach { doc ->
+    val friendsColl = database.getCollection<Map<String, Any>>("friends")
+    friendsColl.find(Filters.eq("friend", user)).toList().forEach { doc ->
         val friendName = doc["user"] as String
         onlineUsers[friendName]?.let { sendFriendList(friendName, it) }
     }
