@@ -154,15 +154,23 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
 
             val officialTarget = targetDoc.getString("name") ?: target
+            
+            // 1. UPDATE DATABASE
             requestsColl.updateOne(Filters.regex("target", "^${Pattern.quote(officialTarget)}$", "i"), 
                 Updates.combine(Updates.addToSet("requesters", user), Updates.setOnInsert("target", officialTarget)), UpdateOptions().upsert(true))
             
-            val receiver = onlineUsers.entries.firstOrNull { it.key.equals(officialTarget, ignoreCase = true) }
-            if (receiver != null) {
-                sendRequestList(officialTarget, receiver.value)
-                receiver.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
+            // 2. FORCE PUSH TO TARGET IF ONLINE
+            val targetEntry = onlineUsers.entries.firstOrNull { it.key.equals(officialTarget, ignoreCase = true) }
+            if (targetEntry != null) {
+                val targetName = targetEntry.key
+                val targetSession = targetEntry.value
+                println("SERVER: FORCE PUSHING REQUEST TO $targetName")
+                sendRequestList(targetName, targetSession)
+                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
             }
-            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε!"))))
+            
+            // 3. CONFIRM TO SENDER
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε στον $officialTarget!"))))
         }
 
         MessageType.ACCEPT_REQUEST -> {
