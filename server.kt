@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
-// --- CONFIGURATION v2.0 (FINAL ULTRA STABLE) ---
+// --- CONFIGURATION v2.0 (FINAL ULTRA STABLE - NO ANDROID IMPORTS) ---
 const val LATEST_VERSION_NAME = "2.0"
 const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
@@ -93,6 +93,7 @@ fun main() {
                     }
                 } catch (e: Exception) { }
 
+                // --- CLEANUP (NO COROUTINE ISSUES) ---
                 var disconnectedUser: String? = null
                 for (entry in onlineUsers.entries) {
                     if (entry.value == this) {
@@ -140,13 +141,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             onlineUsers[officialName] = session
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
             
+            // CRITICAL SYNC (DEEP SCAN)
             sendFriendList(officialName, session)
             sendRequestList(officialName, session)
             notifyFriendsStatus(officialName, true)
 
             for (doc in pendingColl.find(Filters.regex("target", "^${Pattern.quote(officialName)}$", "i")).toList()) {
                 try {
-                    val type = MessageType.valueOf(doc.getString("type"))
+                    val typeStr = doc.getString("type") ?: continue
+                    val type = MessageType.valueOf(typeStr)
                     session.send(Frame.Text(gson.toJson(GameMessage(type, "Server", doc.getString("content")))))
                 } catch (e: Exception) {}
             }
@@ -233,7 +236,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession) {
     if (!::database.isInitialized) return
     val friends = database.getCollection<Document>("friends").find(Filters.eq("user", user)).toList().map { doc ->
-        FriendInfo(doc.getString("friend"), onlineUsers.containsKey(doc.getString("friend")))
+        val fName = doc.getString("friend") ?: ""
+        FriendInfo(fName, onlineUsers.containsKey(fName))
     }
     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.FRIEND_LIST, "Server", gson.toJson(friends)))))
 }
@@ -256,7 +260,7 @@ suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession
 suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
     if (!::database.isInitialized) return
     for (doc in database.getCollection<Document>("friends").find(Filters.eq("friend", user)).toList()) {
-        val friendName = doc.getString("user")
+        val friendName = doc.getString("user") ?: continue
         val sess = onlineUsers[friendName]
         if (sess != null) sendFriendList(friendName, sess)
     }
