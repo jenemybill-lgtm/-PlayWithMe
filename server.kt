@@ -65,7 +65,7 @@ suspend fun initDatabase() {
         val client = MongoClient.create(MONGODB_URI)
         database = client.getDatabase("playwithme")
         println("SERVER: CONNECTED TO MONGODB")
-    } catch (e: Exception) { println("DATABASE ERROR: ${e.message}") }
+    } catch (e: Exception) { println("SERVER DATABASE ERROR: ${e.message}") }
 }
 
 fun main() {
@@ -96,7 +96,7 @@ fun main() {
                 val roomsToClose = mutableListOf<String>()
                 rooms.forEach { (code, room) ->
                     if (room.hostSession == this || room.players.any { it.session == this }) {
-                        runBlocking { room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποχώρησε.")) }
+                        runBlocking { room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποχώρησε. Το δωμάτιο έκλεισε.")) }
                         roomsToClose.add(code)
                     }
                 }
@@ -135,33 +135,40 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             pendingColl.deleteMany(Filters.regex("target", "^$officialName$", "i"))
         }
 
+        MessageType.REGISTER -> {
+            val name = msg.content?.trim() ?: return
+            if (usersColl.countDocuments(Filters.eq("name", name)) == 0L) {
+                usersColl.insertOne(mapOf("name" to name))
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "OK"))))
+            } else { session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "TAKEN")))) }
+        }
+
         MessageType.ADD_FRIEND -> {
             val user = msg.sender.trim(); val target = msg.content?.trim() ?: return
             val targetDoc = usersColl.find(Filters.regex("name", "^$target$", "i")).toList().firstOrNull()
-            
+
             if (targetDoc != null) {
                 val officialTarget = targetDoc["name"] as String
                 if (friendsColl.countDocuments(Filters.and(Filters.eq("user", user), Filters.eq("friend", officialTarget))) > 0L) {
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Είναι ήδη φίλος σου!"))))
                     return
                 }
-                // FIX: Use 'eq' for update to ensure proper string field
                 requestsColl.updateOne(Filters.eq("target", officialTarget), Updates.addToSet("requesters", user), UpdateOptions().upsert(true))
-                
+
                 onlineUsers.entries.find { it.key.equals(officialTarget, ignoreCase = true) }?.let { entry ->
                     sendRequestList(entry.key, entry.value)
                     entry.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
                 }
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε!"))))
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε στον $officialTarget!"))))
             } else { session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο παίκτης δεν βρέθηκε!")))) }
         }
 
         MessageType.ACCEPT_REQUEST -> {
             val user = msg.sender.trim(); val requester = msg.content?.trim() ?: return
-            requestsColl.updateOne(Filters.eq("target", user), Updates.pull("requesters", requester))
+            requestsColl.updateOne(Filters.regex("target", "^$user$", "i"), Updates.pull("requesters", requester))
             friendsColl.insertOne(mapOf("user" to user, "friend" to requester))
             friendsColl.insertOne(mapOf("user" to requester, "friend" to user))
-            sendFriendList(user, session); onlineUsers.entries.find { it.key.equals(requester, ignoreCase = true) }?.let { sendFriendList(it.key, it.value) }
+            sendFriendList(user, session); onlineUsers.entries.find { it.key.equals(requester, ignoreCase = true) }?.let { sendFriendList(it.key, it.value); sendRequestList(it.key, it.value) }
         }
 
         MessageType.CREATE_ROOM -> {
@@ -170,15 +177,18 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             room.players.add(Player(msg.sender, session))
             rooms[code] = room
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.JOIN_RESPONSE, "Server", code))))
+            room.updateHostPlayerCount()
         }
 
         MessageType.JOIN -> {
             val room = rooms[msg.content]
             if (room != null) {
-                if (room.players.none { it.session == session }) room.players.add(Player(msg.sender, session))
+                if (room.players.none { it.name == msg.sender }) {
+                    room.players.add(Player(msg.sender, session))
+                }
                 room.broadcast(GameMessage(MessageType.JOIN_RESPONSE, "Server", room.code))
                 room.updateHostPlayerCount()
-            }
+            } else { session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το δωμάτιο δεν βρέθηκε!")))) }
         }
 
         MessageType.START_GAME -> {
@@ -187,9 +197,19 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val setup: Map<String, Any> = gson.fromJson(msg.content, object : TypeToken<Map<String, Any>>() {}.type)
                 room.questions = setup["questions"] as List<Map<String, Any>>
                 room.timerSeconds = (setup["timer"] as Double).toInt()
+                
+                // --- HARD RESET FOR REUSE ---
                 room.isGameRunning = true
                 room.currentQuestionIndex = 0
-                room.players.forEach { it.score = 0; it.totalTime = 0; it.hasAnswered = false }
+                room.waitingForAnswers = false
+                room.players.forEach { 
+                    it.score = 0
+                    it.totalTime = 0
+                    it.hasAnswered = false
+                    it.lastAnswerIndex = -1
+                }
+                // ----------------------------
+
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
                 CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
             }
@@ -215,6 +235,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 if (targetEntry != null) targetEntry.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.INVITE_RECEIVED, "Server", inviteStr))))
                 else pendingColl.insertOne(mapOf("target" to target, "type" to "INVITE_RECEIVED", "content" to inviteStr))
             }
+        }
+
+        MessageType.CHALLENGE_FRIEND -> {
+            val target = msg.content ?: return; val challengeStr = "${msg.sender}|${(1..99999).random()}"
+            val targetEntry = onlineUsers.entries.find { it.key.equals(target, ignoreCase = true) }
+            if (targetEntry != null) targetEntry.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
+            else pendingColl.insertOne(mapOf("target" to target, "type" to "CHALLENGE_RECEIVED", "content" to challengeStr))
+        }
+
+        MessageType.CHALLENGE_RESULT -> {
+            val target = msg.content?.split("|")?.get(0) ?: return
+            val targetEntry = onlineUsers.entries.find { it.key.equals(target, ignoreCase = true) }
+            if (targetEntry != null) targetEntry.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RESULT, "Server", msg.content))))
+            else pendingColl.insertOne(mapOf("target" to target, "type" to "CHALLENGE_RESULT", "content" to msg.content))
         }
         else -> {}
     }
@@ -250,11 +284,14 @@ suspend fun runGameLoop(room: GameRoom) {
     while (room.currentQuestionIndex < room.questions.size && room.isGameRunning) {
         val question = room.questions[room.currentQuestionIndex]
         val correctIdx = (question["correctAnswerIndex"] as Double).toInt()
-        room.players.forEach { it.hasAnswered = false }
+        room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
         room.waitingForAnswers = true
         room.broadcast(GameMessage(MessageType.QUESTION, "Server", gson.toJson(question)))
+
         var elapsed = 0
-        while (elapsed < room.timerSeconds && room.waitingForAnswers && room.isGameRunning) { delay(1000); elapsed++ }
+        while (elapsed < room.timerSeconds && room.waitingForAnswers && room.isGameRunning) {
+            delay(1000); elapsed++ }
+
         room.waitingForAnswers = false
         room.players.forEach { if (it.lastAnswerIndex == correctIdx) it.score++ }
         val options = question["options"] as List<String>
@@ -267,5 +304,6 @@ suspend fun runGameLoop(room: GameRoom) {
         val rankingText = finalRank.withIndex().joinToString("\n") { "${it.index + 1}. ${it.value.name}: ${it.value.score}" }
         room.broadcast(GameMessage(MessageType.GAME_OVER, "Server", "ΤΕΛΙΚΗ ΚΑΤΑΤΑΞΗ:\n$rankingText"))
         room.isGameRunning = false
+        room.currentQuestionIndex = 0
     }
 }
