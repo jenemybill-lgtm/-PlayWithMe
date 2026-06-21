@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
-// --- CONFIGURATION v2.3 (ULTRA FAST) ---
+// --- CONFIGURATION v2.3 (ULTRA FAST & FIXED) ---
 const val LATEST_VERSION_NAME = "2.0"
 const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
