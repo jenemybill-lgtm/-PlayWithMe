@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
-// --- CONFIGURATION v2.5 (ULTRA STABLE & FAST) ---
+// --- CONFIGURATION v2.0 (FINAL ULTRA STABLE) ---
 const val LATEST_VERSION_NAME = "2.0"
 const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
@@ -56,7 +56,9 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
         val text = gson.toJson(message)
         val sessions = players.map { it.session }.toMutableSet()
         sessions.add(hostSession)
-        sessions.forEach { try { it.send(Frame.Text(text)) } catch(e: Exception) {} }
+        for (session in sessions) {
+            try { session.send(Frame.Text(text)) } catch(e: Exception) {}
+        }
     }
 
     suspend fun updateHostPlayerCount() {
@@ -84,21 +86,27 @@ fun main() {
                 try {
                     for (frame in incoming) {
                         if (frame is Frame.Text) {
-                            val msg = gson.fromJson(frame.readText(), GameMessage::class.java)
+                            val text = frame.readText()
+                            val msg = gson.fromJson(text, GameMessage::class.java)
                             handleMessage(this, msg)
                         }
                     }
                 } catch (e: Exception) { }
 
-                // --- CLEANUP (THREAD-SAFE & COROUTINE-SAFE) ---
+                // --- CLEANUP (THREAD-SAFE FOR LOOPS) ---
                 var disconnectedUser: String? = null
-                onlineUsers.forEach { (name, session) -> if (session == this) disconnectedUser = name }
+                for (entry in onlineUsers.entries) {
+                    if (entry.value == this) {
+                        disconnectedUser = entry.key
+                        break
+                    }
+                }
+                
                 if (disconnectedUser != null) {
                     onlineUsers.remove(disconnectedUser)
                     notifyFriendsStatus(disconnectedUser!!, false)
                 }
 
-                // Cleanup rooms using regular for loop to avoid coroutine issues
                 val iterator = rooms.entries.iterator()
                 while (iterator.hasNext()) {
                     val entry = iterator.next()
@@ -129,16 +137,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.LOGIN -> {
             val name = msg.content?.trim() ?: return
             val officialName = canonicalName(usersColl, name)
+            println("SERVER: Login for $officialName")
             onlineUsers[officialName] = session
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
             
-            // SEQUENTIAL SYNC (Build-Safe)
+            // CRITICAL SYNC
             sendFriendList(officialName, session)
             sendRequestList(officialName, session)
             notifyFriendsStatus(officialName, true)
 
-            pendingColl.find(Filters.regex("target", "^${Pattern.quote(officialName)}$", "i")).toList().forEach { doc ->
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.valueOf(doc.getString("type")), "Server", doc.getString("content")))))
+            for (doc in pendingColl.find(Filters.regex("target", "^${Pattern.quote(officialName)}$", "i")).toList()) {
+                try {
+                    val type = MessageType.valueOf(doc.getString("type"))
+                    session.send(Frame.Text(gson.toJson(GameMessage(type, "Server", doc.getString("content")))))
+                } catch (e: Exception) {}
             }
             pendingColl.deleteMany(Filters.regex("target", "^${Pattern.quote(officialName)}$", "i"))
         }
@@ -152,9 +164,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     requestsColl.updateOne(Filters.regex("target", "^${Pattern.quote(officialTarget)}$", "i"), 
                         Updates.combine(Updates.addToSet("requesters", user), Updates.setOnInsert("target", officialTarget)), UpdateOptions().upsert(true))
                     
-                    onlineUsers.entries.find { it.key.equals(officialTarget, ignoreCase = true) }?.let { entry ->
-                        sendRequestList(entry.key, entry.value)
-                        entry.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
+                    for (entry in onlineUsers.entries) {
+                        if (entry.key.equals(officialTarget, ignoreCase = true)) {
+                            sendRequestList(entry.key, entry.value)
+                            entry.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
+                        }
                     }
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε!"))))
                 } else session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Είναι ήδη φίλος σου!"))))
@@ -169,9 +183,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 room.questions = setup["questions"] as List<Map<String, Any>>
                 room.timerSeconds = (setup["timer"] as Double).toInt()
                 room.isGameRunning = true; room.currentQuestionIndex = 0; room.waitingForAnswers = false
-                room.players.forEach { it.score = 0; it.totalTime = 0; it.hasAnswered = false; it.lastAnswerIndex = -1 }
+                for (p in room.players) { p.score = 0; p.totalTime = 0; p.hasAnswered = false; p.lastAnswerIndex = -1 }
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
-                room.gameJob = CoroutineScope(Dispatchers.Default).launch { delay(1500); runGameLoop(room) }
+                room.gameJob = CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
             }
         }
 
@@ -183,7 +197,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 player.hasAnswered = true
                 player.lastAnswerIndex = parts[0].toIntOrNull() ?: -1
                 player.totalTime += parts.getOrNull(1)?.toLongOrNull() ?: 0
-                if (room.players.all { it.hasAnswered }) room.waitingForAnswers = false
+                
+                var allAnswered = true
+                for (p in room.players) { if (!p.hasAnswered) allAnswered = false }
+                if (allAnswered) room.waitingForAnswers = false
             }
         }
         
@@ -216,17 +233,24 @@ suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession)
 suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession) {
     if (!::database.isInitialized) return
     try {
-        val doc = database.getCollection<Document>("requests").find(Filters.regex("target", "^${Pattern.quote(user)}$", "i")).toList().firstOrNull()
-        val requesters = doc?.get("requesters", List::class.java)?.map { it.toString() } ?: emptyList()
-        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters)))))
-    } catch (e: Exception) { }
+        println("SERVER: Scanning database for $user")
+        val requestsColl = database.getCollection<Document>("requests")
+        val doc = requestsColl.find(Filters.regex("target", "^${Pattern.quote(user)}$", "i")).toList().firstOrNull()
+        val rawRequesters = doc?.get("requesters", List::class.java)
+        val requesters = rawRequesters?.map { it.toString() } ?: emptyList()
+        
+        println("SERVER: Found ${requesters.size} requests for $user")
+        val msg = GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters))
+        session.send(Frame.Text(gson.toJson(msg)))
+    } catch (e: Exception) { println("SERVER ERROR: ${e.message}") }
 }
 
 suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
     if (!::database.isInitialized) return
-    database.getCollection<Document>("friends").find(Filters.eq("friend", user)).toList().forEach { doc ->
+    for (doc in database.getCollection<Document>("friends").find(Filters.eq("friend", user)).toList()) {
         val friendName = doc.getString("user")
-        onlineUsers[friendName]?.let { sendFriendList(friendName, it) }
+        val sess = onlineUsers[friendName]
+        if (sess != null) sendFriendList(friendName, sess)
     }
 }
 
@@ -234,17 +258,16 @@ suspend fun runGameLoop(room: GameRoom) {
     while (room.currentQuestionIndex < room.questions.size && room.isGameRunning) {
         val question = room.questions[room.currentQuestionIndex]
         val correctIdx = (question["correctAnswerIndex"] as Double).toInt()
-        room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
+        for (p in room.players) { p.hasAnswered = false; p.lastAnswerIndex = -1 }
         room.waitingForAnswers = true
         room.broadcast(GameMessage(MessageType.QUESTION, "Server", gson.toJson(question)))
 
-        // --- ULTRA FAST SMART LOOP (200ms checks) ---
         var elapsedMs = 0
         while (elapsedMs < (room.timerSeconds * 1000) && room.waitingForAnswers && room.isGameRunning) {
             delay(200); elapsedMs += 200 }
         
         room.waitingForAnswers = false
-        room.players.forEach { if (it.lastAnswerIndex == correctIdx) it.score++ }
+        for (p in room.players) { if (p.lastAnswerIndex == correctIdx) p.score++ }
         val options = question["options"] as List<String>
         room.broadcast(GameMessage(MessageType.RESULT, "Server", "Σωστή: ${options[correctIdx]}"))
         delay(3000)
