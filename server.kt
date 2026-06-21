@@ -233,16 +233,21 @@ suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession)
 suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession) {
     if (!::database.isInitialized) return
     try {
-        println("SERVER: Scanning database for $user")
+        println("SERVER: !!! FORCE SCAN FOR $user !!!")
         val requestsColl = database.getCollection<Document>("requests")
         val doc = requestsColl.find(Filters.regex("target", "^${Pattern.quote(user)}$", "i")).toList().firstOrNull()
-        val rawRequesters = doc?.get("requesters", List::class.java)
-        val requesters = rawRequesters?.map { it.toString() } ?: emptyList()
         
-        println("SERVER: Found ${requesters.size} requests for $user")
-        val msg = GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters))
+        val rawRequesters = doc?.get("requesters", List::class.java)
+        val requesters = rawRequesters?.mapNotNull { it?.toString() } ?: emptyList()
+        
+        val jsonPayload = gson.toJson(requesters)
+        println("SERVER: !!! SENDING DATA TO $user: $jsonPayload !!!")
+        
+        val msg = GameMessage(MessageType.REQUEST_LIST, "Server", jsonPayload)
         session.send(Frame.Text(gson.toJson(msg)))
-    } catch (e: Exception) { println("SERVER ERROR: ${e.message}") }
+    } catch (e: Exception) { 
+        println("SERVER SOCIAL ERROR FOR $user: ${e.message}") 
+    }
 }
 
 suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
