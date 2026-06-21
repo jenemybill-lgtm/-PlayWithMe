@@ -227,7 +227,7 @@ suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
 }
 
 suspend fun runGameLoop(room: GameRoom) {
-    while (room.currentQuestionIndex < room.questions.size && room.isGameRunning) {
+    while (room.currentQuestionIndex < room.currentQuestionIndex + 1 && room.currentQuestionIndex < room.questions.size && room.isGameRunning) {
         val question = room.questions[room.currentQuestionIndex]
         val correctIdx = (question["correctAnswerIndex"] as Double).toInt()
         room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
