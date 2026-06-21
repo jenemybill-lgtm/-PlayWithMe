@@ -9,6 +9,7 @@ import com.google.gson.reflect.TypeToken
 import com.mongodb.client.model.Filters
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.Updates
+import com.mongodb.client.model.Sorts
 import com.mongodb.kotlin.client.coroutine.MongoClient
 import com.mongodb.kotlin.client.coroutine.MongoCollection
 import com.mongodb.kotlin.client.coroutine.MongoDatabase
@@ -21,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
-// --- CONFIGURATION v2.8 (SINGLE SOURCE - ULTRA STABLE) ---
+// --- CONFIGURATION v2.0 (STABLE & LEADERBOARD) ---
 const val LATEST_VERSION_NAME = "2.0"
 const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
@@ -31,7 +32,8 @@ enum class MessageType {
     CREATE_ROOM, JOIN, JOIN_RESPONSE, START_GAME, QUESTION, ANSWER, RESULT, LEADERBOARD, GAME_OVER, ERROR, RESTART, PLAYER_COUNT, VERSION_CHECK,
     REGISTER, REGISTER_RESPONSE, LOGIN, LOGIN_RESPONSE, ADD_FRIEND, FRIEND_LIST, INVITE, INVITE_RECEIVED,
     ACCEPT_REQUEST, REJECT_REQUEST, REQUEST_LIST,
-    CHALLENGE_FRIEND, CHALLENGE_RECEIVED, CHALLENGE_RESULT
+    CHALLENGE_FRIEND, CHALLENGE_RECEIVED, CHALLENGE_RESULT,
+    GET_LEADERBOARD, LEADERBOARD_DATA
 }
 
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
@@ -93,9 +95,9 @@ fun main() {
                 } catch (e: Exception) { }
 
                 var gone: String? = null
-                for (e in onlineUsers) {
-                    if (e.value == this) {
-                        gone = e.key
+                for (entry in onlineUsers.entries) {
+                    if (entry.value == this) {
+                        gone = entry.key
                         break
                     }
                 }
@@ -129,18 +131,47 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
     val usersColl = database.getCollection<Document>("users")
     val friendsColl = database.getCollection<Document>("friends")
     val requestsColl = database.getCollection<Document>("requests")
+    val leaderboardColl = database.getCollection<Document>("solo_leaderboard")
 
     when (msg.type) {
         MessageType.LOGIN -> {
             val name = msg.content?.trim() ?: return
             val official = canonicalName(usersColl, name)
-            println("SERVER LOGIN: $official")
             onlineUsers[official] = session
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
-            
             sendFriendList(official, session)
             sendRequestList(official, session)
             notifyFriendsStatus(official, true)
+        }
+
+        MessageType.CHALLENGE_RESULT -> {
+            val content = msg.content ?: return
+            if (content.startsWith("LEADERBOARD_SUBMIT")) {
+                val score = content.split("|").getOrNull(1)?.toIntOrNull() ?: 0
+                leaderboardColl.updateOne(
+                    Filters.eq("name", msg.sender),
+                    Updates.combine(
+                        Updates.max("maxScore", score),
+                        Updates.set("lastUpdate", Date())
+                    ),
+                    UpdateOptions().upsert(true)
+                )
+                return
+            }
+            
+            val target = content.split("|").getOrNull(0) ?: return
+            onlineUsers.entries.firstOrNull { it.key.equals(target, ignoreCase = true) }?.let {
+                it.value.send(Frame.Text(gson.toJson(msg)))
+            }
+        }
+
+        MessageType.GET_LEADERBOARD -> {
+            val topScores = leaderboardColl.find()
+                .sort(Sorts.descending("maxScore"))
+                .limit(50)
+                .toList()
+                .map { doc -> mapOf("name" to doc.getString("name"), "score" to doc.getInteger("maxScore")) }
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LEADERBOARD_DATA, "Server", gson.toJson(topScores)))))
         }
 
         MessageType.ADD_FRIEND -> {
@@ -154,22 +185,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
 
             val officialTarget = targetDoc.getString("name") ?: target
-            
-            // 1. UPDATE DATABASE
             requestsColl.updateOne(Filters.regex("target", "^${Pattern.quote(officialTarget)}$", "i"), 
                 Updates.combine(Updates.addToSet("requesters", user), Updates.setOnInsert("target", officialTarget)), UpdateOptions().upsert(true))
             
-            // 2. FORCE PUSH TO TARGET IF ONLINE
-            val targetEntry = onlineUsers.entries.firstOrNull { it.key.equals(officialTarget, ignoreCase = true) }
-            if (targetEntry != null) {
-                val targetName = targetEntry.key
-                val targetSession = targetEntry.value
-                println("SERVER: FORCE PUSHING REQUEST TO $targetName")
-                sendRequestList(targetName, targetSession)
-                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
+            onlineUsers.entries.firstOrNull { it.key.equals(officialTarget, ignoreCase = true) }?.let {
+                sendRequestList(officialTarget, it.value)
+                it.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
             }
-            
-            // 3. CONFIRM TO SENDER
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε στον $officialTarget!"))))
         }
 
@@ -179,8 +201,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             requestsColl.updateOne(Filters.regex("target", "^${Pattern.quote(user)}$", "i"), Updates.pull("requesters", requester))
             friendsColl.insertOne(Document().append("user", user).append("friend", requester))
             friendsColl.insertOne(Document().append("user", requester).append("friend", user))
-            sendFriendList(user, session)
-            sendRequestList(user, session)
+            sendFriendList(user, session); sendRequestList(user, session)
             onlineUsers[requester]?.let { sendFriendList(requester, it) }
         }
 
@@ -244,9 +265,8 @@ suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession
         val doc = requestsColl.find(Filters.regex("target", "^${Pattern.quote(user)}$", "i")).toList().firstOrNull()
         val rawRequesters = doc?.get("requesters", List::class.java)
         val requesters = rawRequesters?.map { it.toString() } ?: emptyList()
-        val msg = GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters))
-        session.send(Frame.Text(gson.toJson(msg)))
-    } catch (e: Exception) { println("SERVER ERROR: ${e.message}") }
+        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(requesters)))))
+    } catch (e: Exception) { }
 }
 
 suspend fun notifyFriendsStatus(user: String, isOnline: Boolean) {
