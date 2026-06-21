@@ -46,6 +46,7 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
     var timerSeconds = 20
     var waitingForAnswers = false
     var isGameRunning = false
+    var gameJob: Job? = null
 
     suspend fun broadcast(message: GameMessage) {
         val text = gson.toJson(message)
@@ -194,6 +195,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.START_GAME -> {
             val room = rooms.values.find { it.hostSession == session }
             if (room != null && msg.content != null) {
+                // --- CANCEL PREVIOUS LOOP IF EXISTS ---
+                room.gameJob?.cancel()
+                
                 val setup: Map<String, Any> = gson.fromJson(msg.content, object : TypeToken<Map<String, Any>>() {}.type)
                 room.questions = setup["questions"] as List<Map<String, Any>>
                 room.timerSeconds = (setup["timer"] as Double).toInt()
@@ -211,7 +215,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 // ----------------------------
 
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
-                CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
+                room.gameJob = CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
             }
         }
 
