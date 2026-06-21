@@ -142,7 +142,16 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
 
             sendFriendList(officialName, session)
+            
+            // --- SCAN AND NOTIFY ON LOGIN ---
+            val reqDoc = requestsColl.find(Filters.regex("target", "^${Pattern.quote(officialName)}$", "i")).toList().firstOrNull()
+            val requesters = (reqDoc?.get("requesters") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
+            if (requesters.isNotEmpty()) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Έχεις ${requesters.size} εκκρεμή αιτήματα φιλίας!"))))
+            }
             sendRequestList(officialName, session)
+            // --------------------------------
+
             notifyFriendsStatus(officialName, true)
 
             pendingColl.find(Filters.regex("target", "^${Pattern.quote(officialName)}$", "i")).toList().forEach { doc ->
