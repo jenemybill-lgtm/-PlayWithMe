@@ -120,6 +120,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             onlineUsers[name] = session
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
             sendFriendList(name, session)
+            
+            // SCAN DATABASE FOR REQUESTS ON LOGIN
+            val reqDoc = requestsColl.find(Filters.eq("target", name)).toList().firstOrNull()
+            val requesters = (reqDoc?.get("requesters") as? List<*>)?.map { it.toString() } ?: emptyList()
+            if (requesters.isNotEmpty()) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Έχεις ${requesters.size} εκκρεμή αιτήματα φιλίας!"))))
+            }
             sendRequestList(name, session)
             notifyFriendsStatus(name, true)
             
@@ -149,7 +156,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 }
                 requestsColl.updateOne(Filters.eq("target", target), Updates.addToSet("requesters", user), UpdateOptions().upsert(true))
                 
-                // CRITICAL FIX: Explicitly send REQUEST_LIST to target if online
                 onlineUsers[target]?.let { targetSession ->
                     sendRequestList(target, targetSession)
                     targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
@@ -163,7 +169,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             requestsColl.updateOne(Filters.eq("target", user), Updates.pull("requesters", requester))
             friendsColl.insertOne(mapOf("user" to user, "friend" to requester))
             friendsColl.insertOne(mapOf("user" to requester, "friend" to user))
-            sendFriendList(user, session); onlineUsers[requester]?.let { sendFriendList(requester, it) }
+            sendFriendList(user, session); onlineUsers[requester]?.let { sendFriendList(requester, it); sendRequestList(requester, it) }
         }
 
         MessageType.CREATE_ROOM -> {
