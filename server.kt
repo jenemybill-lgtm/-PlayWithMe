@@ -321,6 +321,26 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
         }
 
+        MessageType.CHALLENGE_FRIEND -> {
+            val content = msg.content ?: return
+            if (content.startsWith("SOLO|")) {
+                val parts = content.split("|")
+                if (parts.size < 3) return
+                val target = parts[1]
+                val seed = parts[2]
+                val fwd = "SOLO|" + msg.sender + "|" + seed
+                onlineUsers.entries.firstOrNull { it.key.equals(target, ignoreCase = true) }?.let {
+                    it.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", fwd))))
+                }
+            } else {
+                // fallback
+                val target = content
+                onlineUsers.entries.firstOrNull { it.key.equals(target, ignoreCase = true) }?.let {
+                    it.value.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", msg.sender))))
+                }
+            }
+        }
+
         MessageType.GET_LEADERBOARD -> {
             val topScores = leaderboardColl.find()
                 .sort(Sorts.descending("maxScore"))
