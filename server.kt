@@ -375,11 +375,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
                 val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
                 
-                val filter = mutableListOf()
+                val filter = mutableListOf<Any>()
                 if (!categories.contains("Όλες")) filter.add(Filters.`in`("category", categories))
                 if (!difficulties.contains("Όλα")) filter.add(Filters.`in`("difficulty", difficulties))
                 
-                val finalFilter = if (filter.isEmpty()) Document() else Filters.and(*filter.toTypedArray())
+                @Suppress("UNCHECKED_CAST")
+                val finalFilter = if (filter.isEmpty()) Document() else Filters.and(filter as List<com.mongodb.client.model.Bson>)
                 val questions = questionsColl.find(finalFilter).toList().shuffled().take(count)
                 
                 room.questions = questions
