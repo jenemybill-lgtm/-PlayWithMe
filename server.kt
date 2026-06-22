@@ -10,6 +10,7 @@ import com.mongodb.client.model.Filters
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.Updates
 import com.mongodb.client.model.Sorts
+import com.mongodb.client.model.Bson
 import com.mongodb.kotlin.client.coroutine.MongoClient
 import com.mongodb.kotlin.client.coroutine.MongoCollection
 import com.mongodb.kotlin.client.coroutine.MongoDatabase
@@ -375,11 +376,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
                 val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
                 
-                val filter = mutableListOf<com.mongodb.client.model.Bson>()
+                val filter = mutableListOf<Bson>()
                 if (!categories.contains("Όλες")) filter.add(Filters.`in`("category", categories))
                 if (!difficulties.contains("Όλα")) filter.add(Filters.`in`("difficulty", difficulties))
                 
-                val finalFilter = if (filter.isEmpty()) Document() else Filters.and(filter)
+                val finalFilter = if (filter.isEmpty()) Document() else Filters.and(*filter.toTypedArray())
                 val questions = questionsColl.find(finalFilter).toList().shuffled().take(count)
                 
                 room.questions = questions
