@@ -290,11 +290,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.GET_SOLO_QUESTIONS -> {
+            // Return in difficulty order: 15 easy, then 45 medium, then 40 hard
+            // (shuffle only within each difficulty group)
             val easy = questionsColl.find(Filters.eq("difficulty", "Εύκολο")).toList().shuffled().take(15)
             val medium = questionsColl.find(Filters.eq("difficulty", "Μέτριο")).toList().shuffled().take(45)
             val hard = questionsColl.find(Filters.eq("difficulty", "Δύσκολο")).toList().shuffled().take(40)
             
-            val allSolo = (easy + medium + hard).shuffled()
+            val allSolo = easy + medium + hard
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(allSolo)))))
         }
 
