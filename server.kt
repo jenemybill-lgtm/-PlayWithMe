@@ -296,7 +296,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val medium = questionsColl.find(Filters.eq("difficulty", "Μέτριο")).toList().shuffled().take(45)
             val hard = questionsColl.find(Filters.eq("difficulty", "Δύσκολο")).toList().shuffled().take(40)
             
-            val allSolo = easy + medium + hard
+            val allSolo = (easy + medium + hard).toMutableList()
+            if (allSolo.size < 100) {
+                val allDb = questionsColl.find().toList().shuffled()
+                val more = allDb.filter { q -> allSolo.none { (it["text"] as? String) == (q["text"] as? String) } }.take(100 - allSolo.size)
+                allSolo.addAll(more)
+            }
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(allSolo)))))
         }
 
