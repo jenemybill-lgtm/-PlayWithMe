@@ -9,7 +9,6 @@ import com.google.gson.reflect.TypeToken
 import com.mongodb.client.model.Filters
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.Updates
-import com.mongodb.client.model.Sorts
 import com.mongodb.kotlin.client.coroutine.MongoClient
 import com.mongodb.kotlin.client.coroutine.MongoCollection
 import com.mongodb.kotlin.client.coroutine.MongoDatabase
@@ -22,9 +21,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
-// ==================== CONFIG v4.2 (FIXED & IMPROVED) ====================
-const val LATEST_VERSION_NAME = "2.0"
-const val LATEST_VERSION_CODE = 11
+// ==================== CONFIG ====================
+const val LATEST_VERSION_NAME = "2.1"
+const val LATEST_VERSION_CODE = 12
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: error("MONGODB_URI environment variable is required")
 
@@ -66,9 +65,7 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
         val text = gson.toJson(message)
         val sessions = players.map { it.session }.toMutableSet()
         sessions.add(hostSession)
-        sessions.forEach {
-            try { it.send(Frame.Text(text)) } catch (e: Exception) {}
-        }
+        sessions.forEach { try { it.send(Frame.Text(text)) } catch (e: Exception) {} }
     }
 
     suspend fun updateHostPlayerCount() {
@@ -85,7 +82,7 @@ suspend fun initDatabase() {
         database = client.getDatabase("playwithme")
         println("SERVER: DATABASE CONNECTED SUCCESSFULLY")
     } catch (e: Exception) {
-        println("DATABASE CONNECTION ERROR: ${e.message}")
+        println("DATABASE ERROR: ${e.message}")
     }
 }
 
@@ -108,7 +105,6 @@ fun main() {
                     }
                 } catch (e: Exception) {}
 
-                // Cleanup on disconnect
                 val gone = onlineUsers.entries.find { it.value == this }?.key
                 gone?.let {
                     onlineUsers.remove(it)
@@ -167,14 +163,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val name = msg.content?.trim() ?: return
             val official = canonicalName(usersColl, name)
             onlineUsers[official] = session
+
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
             sendFriendList(official, session)
-            sendRequestList(official, session)
+            sendRequestList(official, session)           // ← Σημαντικό για requests
             notifyFriendsStatus(official, true)
             syncOfflineScoresForPlayer(official, offlineScoresColl, leaderboardColl)
         }
 
-        // ==================== ADD_FRIEND (FULLY IMPROVED) ====================
+        // ==================== ADD_FRIEND (ΔΙΟΡΘΩΜΕΝΟ) ====================
         MessageType.ADD_FRIEND -> {
             val user = canonicalName(usersColl, msg.sender.trim())
             val targetRaw = msg.content?.trim() ?: return
@@ -184,6 +181,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο παίκτης δεν βρέθηκε!"))))
                 return
             }
+
             val officialTarget = targetDoc.getString("name") ?: targetRaw
 
             if (user.equals(officialTarget, ignoreCase = true)) {
@@ -191,13 +189,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 return
             }
 
-            val alreadyFriends = friendsColl.countDocuments(Filters.and(Filters.eq("user", user), Filters.eq("friend", officialTarget))) > 0
+            val alreadyFriends = friendsColl.countDocuments(
+                Filters.and(Filters.eq("user", user), Filters.eq("friend", officialTarget))
+            ) > 0
             if (alreadyFriends) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Είστε ήδη φίλοι!"))))
                 return
             }
 
-            val hasPending = requestsColl.find(Filters.and(Filters.regex("target", "^${Pattern.quote(officialTarget)}$", "i"), Filters.eq("requesters", user))).firstOrNull() != null
+            val hasPending = requestsColl.find(
+                Filters.and(
+                    Filters.regex("target", "^${Pattern.quote(officialTarget)}$", "i"),
+                    Filters.eq("requesters", user)
+                )
+            ).firstOrNull() != null
             if (hasPending) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Έχεις ήδη στείλει αίτημα!"))))
                 return
@@ -209,21 +214,16 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 UpdateOptions().upsert(true)
             )
 
-            onlineUsers[officialTarget]?.let {
-                sendRequestList(officialTarget, it)
-                it.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα από $user!"))))
+            // Ενημέρωση παραλήπτη (αν είναι online)
+            val targetSession = onlineUsers[officialTarget]
+            if (targetSession != null) {
+                sendRequestList(officialTarget, targetSession)
+                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Νέο αίτημα φιλίας από $user!"))))
             }
-            sendRequestList(user, session)
-            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε στον $officialTarget!"))))
-        }
 
-        // ==================== ADMIN ONLY ====================
-        MessageType.UPLOAD_QUESTIONS, MessageType.GET_PENDING_QUESTIONS,
-        MessageType.APPROVE_QUESTION, MessageType.REJECT_QUESTION -> {
-            if (!isAdmin(msg.sender)) {
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν έχεις δικαίωμα πρόσβασης!"))))
-                return
-            }
+            // Ενημέρωση αποστολέα
+            sendRequestList(user, session)
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε επιτυχώς!"))))
         }
 
         // ==================== SYNC OFFLINE SCORES (FIXED) ====================
@@ -243,11 +243,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     gson.toJson(mapOf("success" to true, "count" to scores.size))))))
             } catch (e: Exception) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SYNC_OFFLINE_SCORES_RESPONSE, "Server",
-                    gson.toJson(mapOf("success" to false, "error" to e.message))))))
+                    gson.toJson(mapOf("success" to false))))))
             }
         }
 
-        // ==================== START GAME ====================
+        // ==================== START_GAME / ANSWER / CREATE_ROOM / JOIN ====================
         MessageType.START_GAME -> {
             val room = rooms.values.find { it.hostSession == session }
             if (room != null && msg.content != null) {
@@ -260,14 +260,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val timer = (setup["timer"] as? Double)?.toInt() ?: 20
 
                 val questions = when {
-                    categories.contains("Όλες") && difficulties.contains("Όλα") ->
-                        questionsColl.find().toList().shuffled().take(count)
-                    categories.contains("Όλες") ->
-                        questionsColl.find(Filters.`in`("difficulty", difficulties)).toList().shuffled().take(count)
-                    difficulties.contains("Όλα") ->
-                        questionsColl.find(Filters.`in`("category", categories)).toList().shuffled().take(count)
-                    else ->
-                        questionsColl.find(Filters.and(Filters.`in`("category", categories), Filters.`in`("difficulty", difficulties))).toList().shuffled().take(count)
+                    categories.contains("Όλες") && difficulties.contains("Όλα") -> questionsColl.find().toList().shuffled().take(count)
+                    categories.contains("Όλες") -> questionsColl.find(Filters.`in`("difficulty", difficulties)).toList().shuffled().take(count)
+                    difficulties.contains("Όλα") -> questionsColl.find(Filters.`in`("category", categories)).toList().shuffled().take(count)
+                    else -> questionsColl.find(Filters.and(Filters.`in`("category", categories), Filters.`in`("difficulty", difficulties))).toList().shuffled().take(count)
                 }
 
                 room.questions = questions
@@ -276,9 +272,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 room.currentQuestionIndex = 0
                 room.waitingForAnswers = false
 
-                room.players.forEach {
-                    it.score = 0; it.totalTime = 0; it.hasAnswered = false; it.lastAnswerIndex = -1
-                }
+                room.players.forEach { it.score = 0; it.totalTime = 0; it.hasAnswered = false; it.lastAnswerIndex = -1 }
 
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", timer.toString()))
                 room.gameJob = CoroutineScope(Dispatchers.Default).launch {
@@ -288,7 +282,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
         }
 
-        // ==================== ANSWER ====================
         MessageType.ANSWER -> {
             val room = rooms.values.find { r -> r.players.any { it.session == session } }
             val player = room?.players?.find { it.session == session }
@@ -301,7 +294,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
         }
 
-        // ==================== CREATE / JOIN ROOM ====================
         MessageType.CREATE_ROOM -> {
             val code = (10000..99999).random().toString()
             rooms[code] = GameRoom(code, session).apply { players.add(Player(msg.sender, session)) }
@@ -311,18 +303,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.JOIN -> {
             val room = rooms[msg.content]
             if (room != null) {
-                if (room.players.none { it.session == session }) {
-                    room.players.add(Player(msg.sender, session))
-                }
+                if (room.players.none { it.session == session }) room.players.add(Player(msg.sender, session))
                 room.broadcast(GameMessage(MessageType.JOIN_RESPONSE, "Server", room.code))
                 room.updateHostPlayerCount()
             } else {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το δωμάτιο δεν βρέθηκε!"))))
             }
         }
-
-        // Add the rest of your original handlers here if needed (GET_LEADERBOARD, CHALLENGE_FRIEND, etc.)
-        // They can stay exactly as you had them.
 
         else -> {}
     }
@@ -382,8 +369,7 @@ suspend fun runGameLoop(room: GameRoom) {
 
         var elapsed = 0
         while (elapsed < room.timerSeconds * 1000 && room.waitingForAnswers && room.isGameRunning) {
-            delay(200)
-            elapsed += 200
+            delay(200); elapsed += 200
         }
 
         room.waitingForAnswers = false
