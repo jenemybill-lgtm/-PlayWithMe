@@ -17,6 +17,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.toList
 import org.bson.Document
+import org.bson.conversions.Bson
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -375,13 +376,17 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
                 val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
                 
-                val filter = mutableListOf<Any>()
-                if (!categories.contains("Όλες")) filter.add(Filters.`in`("category", categories))
-                if (!difficulties.contains("Όλα")) filter.add(Filters.`in`("difficulty", difficulties))
-                
-                @Suppress("UNCHECKED_CAST")
-                val finalFilter = if (filter.isEmpty()) Document() else Filters.and(filter as List<com.mongodb.client.model.Bson>)
-                val questions = questionsColl.find(finalFilter).toList().shuffled().take(count)
+                val questions = if (categories.contains("Όλες") && difficulties.contains("Όλα")) {
+                    questionsColl.find().toList().shuffled().take(count)
+                } else if (categories.contains("Όλες")) {
+                    questionsColl.find(Filters.`in`("difficulty", difficulties)).toList().shuffled().take(count)
+                } else if (difficulties.contains("Όλα")) {
+                    questionsColl.find(Filters.`in`("category", categories)).toList().shuffled().take(count)
+                } else {
+                    val categoryFilter = Filters.`in`("category", categories)
+                    val difficultyFilter = Filters.`in`("difficulty", difficulties)
+                    questionsColl.find(Filters.and(categoryFilter, difficultyFilter)).toList().shuffled().take(count)
+                }
                 
                 room.questions = questions
                 room.timerSeconds = (setup["timer"] as Double).toInt()
