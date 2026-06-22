@@ -1,0 +1,12 @@
+.git
+.gitignore
+*.md
+build/
+.gradle/
+.idea/
+*.iml
+settings.gradle
+version.json
+gradlew
+gradlew.bat
+gradle/wrapper/
