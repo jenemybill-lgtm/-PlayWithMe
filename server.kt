@@ -484,19 +484,32 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         // ==================== SOLO QUESTIONS ====================
         MessageType.GET_SOLO_QUESTIONS -> {
             val allSoloQuestions = mutableListOf<Document>()
-            val categoriesToSample = ALL_CATEGORIES.shuffled().take(5) // Sample from some categories
             
-            val counts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
+            // Fetch questions across ALL categories to ensure we have enough
+            val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
             
-            counts.forEach { (diff, targetCount) ->
-                var collectedForDiff = 0
-                for (cat in (categoriesToSample + "Άλλα")) {
-                    if (collectedForDiff >= targetCount) break
-                    val needed = targetCount - collectedForDiff
-                    val fromCat = getQuestionsCollection(cat).find(Filters.eq("difficulty", diff)).toList().shuffled().take(needed)
-                    allSoloQuestions.addAll(fromCat)
-                    collectedForDiff += fromCat.size
+            diffCounts.forEach { (diff, targetCount) ->
+                val collected = mutableListOf<Document>()
+                // First try across all actual categories
+                for (cat in ALL_CATEGORIES.shuffled()) {
+                    if (collected.size >= targetCount) break
+                    val fromCat = getQuestionsCollection(cat).find(Filters.eq("difficulty", diff)).toList()
+                    collected.addAll(fromCat)
                 }
+                
+                // If still not enough, try the catch-all "questions" collection
+                if (collected.size < targetCount) {
+                    val fromMain = database.getCollection<Document>("questions").find(Filters.eq("difficulty", diff)).toList()
+                    collected.addAll(fromMain)
+                }
+                
+                allSoloQuestions.addAll(collected.distinctBy { it.getString("text") }.shuffled().take(targetCount))
+            }
+            
+            // Final fallback: if no questions found at all, just take anything
+            if (allSoloQuestions.isEmpty()) {
+                val fallback = database.getCollection<Document>("questions").find().limit(100).toList()
+                allSoloQuestions.addAll(fallback)
             }
             
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(allSoloQuestions)))))
