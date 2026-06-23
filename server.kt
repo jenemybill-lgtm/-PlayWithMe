@@ -216,8 +216,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.ACCEPT_REQUEST -> {
             val user = canonicalName(usersColl, msg.sender.trim())
             val requester = msg.content ?: return
-            // Χρήση regex για να βρούμε το έγγραφο ανεξάρτητα από κεφαλαία/πεζά στο target
+            
+            // Αφαίρεση του αιτήματος
             requestsColl.updateOne(Filters.regex("target", "^${Pattern.quote(user)}$", "i"), Updates.pull("requesters", requester))
+            // Cleanup: Αν η λίστα άδειασε, σβήνουμε το έγγραφο
+            requestsColl.deleteMany(Filters.and(Filters.regex("target", "^${Pattern.quote(user)}$", "i"), Filters.size("requesters", 0)))
+            
             friendsColl.insertOne(Document("user", user).append("friend", requester))
             friendsColl.insertOne(Document("user", requester).append("friend", user))
             
@@ -232,8 +236,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.REJECT_REQUEST -> {
             val user = canonicalName(usersColl, msg.sender.trim())
             val requester = msg.content ?: return
-            // Χρήση regex για σωστό ταίριασμα
+            
             requestsColl.updateOne(Filters.regex("target", "^${Pattern.quote(user)}$", "i"), Updates.pull("requesters", requester))
+            // Cleanup
+            requestsColl.deleteMany(Filters.and(Filters.regex("target", "^${Pattern.quote(user)}$", "i"), Filters.size("requesters", 0)))
+            
             sendRequestList(user, session)
             onlineUsers[requester]?.let { sendRequestList(requester, it) }
         }
@@ -356,25 +363,25 @@ suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession
     try {
         val requestsColl = database.getCollection<Document>("requests")
         
-        // Incoming: Μαζεύουμε όλα τα αιτήματα από όλα τα πιθανά έγγραφα που αφορούν τον χρήστη (case-insensitive)
+        // Incoming: Αιτήματα ΠΡΟΣ τον χρήστη
         val incoming = mutableSetOf<String>()
-        requestsColl.find(Filters.regex("target", "^${Pattern.quote(user)}$", "i")).collect { doc ->
+        requestsColl.find(Filters.regex("target", "^${Pattern.quote(user)}$", "i")).toList().forEach { doc ->
             (doc["requesters"] as? List<*>)?.forEach { incoming.add(it.toString()) }
         }
         
-        // Outgoing: Ψάχνουμε σε όλα τα έγγραφα πού ο χρήστης έχει στείλει αίτημα (περιλαμβάνεται στους requesters)
+        // Outgoing: Αιτήματα ΑΠΟ τον χρήστη προς άλλους
         val outgoing = mutableSetOf<String>()
-        requestsColl.find(Filters.regex("requesters", "^${Pattern.quote(user)}$", "i")).collect { doc ->
+        // Ψάχνουμε έγγραφα όπου ο χρήστης είναι μέσα στη λίστα requesters
+        requestsColl.find(Filters.`in`("requesters", user)).toList().forEach { doc ->
             val target = doc.getString("target")
             if (target != null) outgoing.add(target)
         }
         
         val response = RequestLists(incoming.toList(), outgoing.toList())
         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(response)))))
-        println("SERVER: Sent consolidated RequestList to $user (In: ${incoming.size}, Out: ${outgoing.size})")
+        println("SERVER: Sync RequestList for $user -> In: ${incoming.size}, Out: ${outgoing.size}")
     } catch (e: Exception) {
-        println("SERVER ERROR in sendRequestList for $user: ${e.message}")
-        e.printStackTrace()
+        println("SERVER ERROR (sendRequestList): ${e.message}")
     }
 }
 
