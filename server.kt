@@ -40,7 +40,8 @@ enum class MessageType {
     GET_PENDING_QUESTIONS, PENDING_QUESTIONS_DATA,
     APPROVE_QUESTION, REJECT_QUESTION, QUESTION_MODERATION_RESPONSE,
     SYNC_OFFLINE_SCORES, SYNC_OFFLINE_SCORES_RESPONSE,
-    CHECK_NEW_QUESTIONS, NEW_QUESTIONS_DATA
+    CHECK_NEW_QUESTIONS, NEW_QUESTIONS_DATA,
+    GET_DISCOVER_PLAYERS, DISCOVER_PLAYERS_DATA
 }
 
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
@@ -335,6 +336,99 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 leaderboardColl.updateOne(Filters.eq("name", msg.sender), Updates.combine(Updates.max("maxScore", maxScore), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SYNC_OFFLINE_SCORES_RESPONSE, "Server", "OK"))))
             } catch (e: Exception) {}
+        }
+
+        // ==================== BULK UPLOAD QUESTIONS ====================
+        MessageType.UPLOAD_QUESTIONS -> {
+            try {
+                val listType = object : TypeToken<List<Map<String, Any>>>() {}.type
+                val newQuestions: List<Map<String, Any>> = gson.fromJson(msg.content, listType)
+                var added = 0
+                newQuestions.forEach { q ->
+                    val text = q["text"] as? String ?: return@forEach
+                    val exists = questionsColl.find(Filters.eq("text", text)).firstOrNull() != null
+                    if (!exists) {
+                        questionsColl.insertOne(Document(q))
+                        added++
+                    }
+                }
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Συγχρονίστηκαν $added νέες ερωτήσεις!"))))
+            } catch (e: Exception) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αποτυχία συγχρονισμού ερωτήσεων."))))
+            }
+        }
+
+        // ==================== SUGGEST QUESTION ====================
+        MessageType.SUGGEST_QUESTION -> {
+            try {
+                val suggestion = Document.parse(msg.content)
+                suggestion.append("suggestedBy", msg.sender)
+                suggestion.append("createdAt", Date())
+                suggestion.append("isApproved", false)
+                database.getCollection<Document>("suggested_questions").insertOne(suggestion)
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SUGGEST_QUESTION_RESPONSE, "Server", "OK"))))
+            } catch (e: Exception) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα κατά την αποθήκευση."))))
+            }
+        }
+
+        // ==================== SOLO QUESTIONS ====================
+        MessageType.GET_SOLO_QUESTIONS -> {
+            val easy = questionsColl.find(Filters.eq("difficulty", "Εύκολο")).toList().shuffled().take(15)
+            val medium = questionsColl.find(Filters.eq("difficulty", "Μέτριο")).toList().shuffled().take(45)
+            val hard = questionsColl.find(Filters.eq("difficulty", "Δύσκολο")).toList().shuffled().take(40)
+            val all = (easy + medium + hard)
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(all)))))
+        }
+
+        // ==================== LEADERBOARD ====================
+        MessageType.GET_LEADERBOARD -> {
+            val top = leaderboardColl.find().sort(Document("maxScore", -1)).limit(50).toList()
+                .map { mapOf("name" to it.getString("name"), "score" to it.getInteger("maxScore")) }
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LEADERBOARD_DATA, "Server", gson.toJson(top)))))
+        }
+
+        // ==================== MODERATION (ADMIN) ====================
+        MessageType.GET_PENDING_QUESTIONS -> {
+            if (ADMIN_USERS.contains(msg.sender)) {
+                val pending = database.getCollection<Document>("suggested_questions")
+                    .find(Filters.eq("isApproved", false)).toList()
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(pending)))))
+            }
+        }
+
+        MessageType.APPROVE_QUESTION -> {
+            if (ADMIN_USERS.contains(msg.sender)) {
+                try {
+                    val qDoc = Document.parse(msg.content)
+                    val id = qDoc.getObjectId("_id")
+                    val fullDoc = database.getCollection<Document>("suggested_questions").find(Filters.eq("_id", id)).firstOrNull()
+                    if (fullDoc != null) {
+                        val approved = Document(fullDoc).apply {
+                            remove("_id")
+                            append("isApproved", true)
+                        }
+                        questionsColl.insertOne(approved)
+                        database.getCollection<Document>("suggested_questions").updateOne(Filters.eq("_id", id), Updates.set("isApproved", true))
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
+                    }
+                } catch (e: Exception) {}
+            }
+        }
+
+        // ==================== DISCOVER PLAYERS ====================
+        MessageType.GET_DISCOVER_PLAYERS -> {
+            val user = msg.sender
+            // Παίρνουμε όλους τους χρήστες (εκτός από εμάς)
+            val allUsers = usersColl.find(Filters.ne("name", user)).limit(20).toList()
+            val myFriends = friendsColl.find(Filters.eq("user", user)).toList().map { it.getString("friend") }.toSet()
+            
+            // Φιλτράρουμε όσους ΔΕΝ είναι ήδη φίλοι μας
+            val discoverable = allUsers.mapNotNull { it.getString("name") }
+                .filter { !myFriends.contains(it) }
+                .take(10)
+
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DISCOVER_PLAYERS_DATA, "Server", gson.toJson(discoverable)))))
         }
 
         else -> {}
