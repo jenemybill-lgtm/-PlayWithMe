@@ -606,16 +606,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     val contentDoc = Document.parse(msg.content)
                     val idString = contentDoc.getString("_id") ?: return
                     val id = org.bson.types.ObjectId(idString)
-                    val fullDoc = database.getCollection<Document>("suggested_questions").find(Filters.eq("_id", id)).firstOrNull()
-                    if (fullDoc != null) {
-                        val category = fullDoc.getString("category") ?: "Άλλα"
-                        val approved = Document(fullDoc).apply {
-                            remove("_id")
-                            append("isApproved", true)
-                        }
-                        getQuestionsCollection(category).insertOne(approved)
-                        database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
+                    
+                    // NEW LOGIC: Admin app saves it locally first, then tells server to DELETE from suggestions
+                    val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
+                    if (result.deletedCount > 0) {
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
+                    } else {
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε."))))
                     }
                 } catch (e: Exception) {
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα έγκρισης: ${e.message}"))))
@@ -646,18 +643,19 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         // ==================== DISCOVER PLAYERS ====================
         MessageType.GET_DISCOVER_PLAYERS -> {
             val user = msg.sender
-            // Get all users
-            val allUsers = usersColl.find(Filters.ne("name", user)).limit(30).toList()
+            // 1. Get ALL users except the current one
+            val allUsers = usersColl.find(Filters.ne("name", user)).limit(50).toList()
             
-            // Get my friends from the new folder structure
+            // 2. Get existing friends to filter them out
             val myFriendsDoc = friendsColl.find(Filters.eq("_id", user)).firstOrNull()
             val myFriends = (myFriendsDoc?.get("friends") as? List<*>)?.map { it.toString() }?.toSet() ?: emptySet()
 
-            // Filter out those who ARE already friends
+            // 3. Filter out those who are already friends
             val discoverable = allUsers.mapNotNull { it.getString("name") }
                 .filter { !myFriends.contains(it) }
-                .take(15)
+                .take(30)
 
+            println("SERVER: Discover Players for $user -> Found ${discoverable.size} candidates")
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DISCOVER_PLAYERS_DATA, "Server", gson.toJson(discoverable)))))
         }
 
@@ -818,18 +816,37 @@ suspend fun updateDuelStats(coll: MongoCollection<Document>, p1: String, p2: Str
 suspend fun fetchQuestions(coll: MongoCollection<Document>, count: Int, cats: List<String>, diffs: List<String>): List<Document> {
     val allQuestions = mutableListOf<Document>()
     
-    val actualCats = if (cats.contains("Όλες")) ALL_CATEGORIES else cats
+    val actualCats = if (cats.contains("Όλες") || cats.contains("Όλα")) ALL_CATEGORIES else cats
     
     actualCats.forEach { cat ->
-        val filter = if (diffs.contains("Όλα")) {
+        val filter = if (diffs.contains("Όλα") || diffs.contains("Όλα")) {
             Filters.empty()
         } else {
             Filters.`in`("difficulty", diffs)
         }
-        allQuestions.addAll(getQuestionsCollection(cat).find(filter).toList())
+        
+        // 1. Try category specific collection
+        val fromCat = getQuestionsCollection(cat).find(filter).toList()
+        allQuestions.addAll(fromCat)
+        
+        // 2. Fallback: Try general 'questions' collection if cat-specific was empty
+        if (fromCat.isEmpty()) {
+            val generalFilter = if (filter == Filters.empty()) {
+                Filters.eq("category", cat)
+            } else {
+                Filters.and(Filters.eq("category", cat), filter)
+            }
+            allQuestions.addAll(database.getCollection<Document>("questions").find(generalFilter).toList())
+        }
     }
     
-    return allQuestions.shuffled().take(count)
+    // Final sanity fallback: if no questions found at all, just grab some from the main collection
+    if (allQuestions.isEmpty()) {
+        println("SERVER: fetchQuestions returned 0 results for cats: $cats, diffs: $diffs. Falling back to general.")
+        allQuestions.addAll(database.getCollection<Document>("questions").find().limit(count * 2).toList())
+    }
+    
+    return allQuestions.distinctBy { it.getString("text") }.shuffled().take(count)
 }
 
 suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession) {
