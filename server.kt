@@ -315,13 +315,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.ACCEPT_REQUEST -> {
             val user = canonicalName(usersColl, msg.sender.trim())
-            val requester = msg.content ?: return
+            val requester = msg.content?.trim() ?: return
 
             // 1. Remove from folders
             requestsColl.updateOne(Filters.eq("_id", user), Updates.pull("incoming", requester))
             requestsColl.updateOne(Filters.eq("_id", requester), Updates.pull("outgoing", user))
 
-            // 2. Add to friends folders
+            // 2. Add to friends folders (BIDIRECTIONAL)
             friendsColl.updateOne(
                 Filters.eq("_id", user),
                 Updates.combine(Updates.addToSet("friends", requester), Updates.setOnInsert("_id", user)),
