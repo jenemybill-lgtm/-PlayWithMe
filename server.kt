@@ -502,10 +502,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
         }
 
-        MessageType.USE_POWERUP -> {
-            // Powerups REMOVED
-        }
-
         MessageType.SYNC_OFFLINE_SCORES -> {
             try {
                 val scores: List<Map<String, Any>> = gson.fromJson(msg.content, object : TypeToken<List<Map<String, Any>>>() {}.type)
