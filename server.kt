@@ -160,7 +160,7 @@ fun main() {
                     val room = entry.value
                     val isParticipant = room.players.any { it.session == this }
                     val isHost = room.hostSession == this
-
+                    
                     if (isParticipant || isHost) {
                         if (room.isGameRunning) {
                             runBlocking { room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποσυνδέθηκε.")) }
@@ -209,18 +209,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.REGISTER -> {
             val name = msg.content?.trim() ?: return
-            
-            // Input Validation
-            if (name.length < 3 || name.length > 20 || !name.all { it.isLetterOrDigit() || it == '_' }) {
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "INVALID_FORMAT"))))
-                return
-            }
-
-            if (containsProfanity(name)) {
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "PROFANITY"))))
-                return
-            }
-
             val existing = usersColl.find(Filters.regex("name", "^${Pattern.quote(name)}$", "i")).firstOrNull()
             if (existing != null) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "EXISTS"))))
@@ -236,7 +224,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             onlineUsers[official] = session
 
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
-
+            
             // Pending Messages
             pendingColl.find(Filters.eq("target", official)).toList().forEach { doc ->
                 val type = MessageType.valueOf(doc.getString("type") ?: "ERROR")
@@ -259,7 +247,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 return
             }
             val officialTarget = targetDoc.getString("name") ?: targetRaw
-            if (user == officialTarget) return
+            
+            if (user.equals(officialTarget, ignoreCase = true)) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν μπορείς να στείλεις αίτημα στον εαυτό σου!"))))
+                return
+            }
 
             // 1. Check if already friends
             val myFriendsDoc = friendsColl.find(Filters.eq("_id", user)).firstOrNull()
@@ -344,7 +336,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.REJECT_REQUEST -> {
             val user = canonicalName(usersColl, msg.sender.trim())
-            val requester = msg.content ?: return
+            val requester = msg.content?.trim() ?: return
 
             // Remove from folders
             requestsColl.updateOne(Filters.eq("_id", user), Updates.pull("incoming", requester))
@@ -604,8 +596,19 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (ADMIN_USERS.contains(msg.sender)) {
                 try {
                     val contentDoc = Document.parse(msg.content)
-                    val idString = contentDoc.getString("_id") ?: return
-                    val id = org.bson.types.ObjectId(idString)
+                    val rawId = contentDoc["_id"]?.toString() ?: return
+                    
+                    // Robust extraction of 24-character hex string
+                    val cleanId = if (rawId.contains("$oid")) {
+                        rawId.substringAfter("$oid\": \"").substringBefore("\"")
+                             .substringAfter("$oid=").substringBefore("}")
+                             .trim()
+                    } else {
+                        val match = Regex("[a-fA-F0-9]{24}").find(rawId)
+                        match?.value ?: rawId.trim()
+                    }
+                    
+                    val id = org.bson.types.ObjectId(cleanId)
                     
                     // NEW LOGIC: Admin app saves it locally first, then tells server to DELETE from suggestions
                     val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
@@ -615,6 +618,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε."))))
                     }
                 } catch (e: Exception) {
+                    println("APPROVE ERROR: ${e.message} | Content: ${msg.content}")
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα έγκρισης: ${e.message}"))))
                 }
             }
@@ -624,8 +628,19 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (ADMIN_USERS.contains(msg.sender)) {
                 try {
                     val contentDoc = Document.parse(msg.content)
-                    val idString = contentDoc.getString("_id") ?: return
-                    val id = org.bson.types.ObjectId(idString)
+                    val rawId = contentDoc["_id"]?.toString() ?: return
+                    
+                    // Robust extraction of 24-character hex string
+                    val cleanId = if (rawId.contains("$oid")) {
+                        rawId.substringAfter("$oid\": \"").substringBefore("\"")
+                             .substringAfter("$oid=").substringBefore("}")
+                             .trim()
+                    } else {
+                        val match = Regex("[a-fA-F0-9]{24}").find(rawId)
+                        match?.value ?: rawId.trim()
+                    }
+                    
+                    val id = org.bson.types.ObjectId(cleanId)
                     val reason = contentDoc.getString("reason") ?: ""
                     
                     val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
@@ -635,6 +650,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε."))))
                     }
                 } catch (e: Exception) {
+                    println("REJECT ERROR: ${e.message} | Content: ${msg.content}")
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα απόρριψης: ${e.message}"))))
                 }
             }
@@ -698,51 +714,34 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.DUEL_START -> {
-            val sender = msg.sender
             val content = msg.content ?: return
             val parts = content.split("|")
             val duelId = parts.getOrNull(0) ?: return
-            val categories = parts.getOrNull(1)?.split(",") ?: emptyList()
+            val player = msg.sender
             
             val duel = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
             
-            if (sender == duel.getString("player1")) {
-                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_categories", categories), Updates.set("p1_ready", true)))
+            if (player == duel.getString("player1")) {
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("p1_ready", true))
             } else {
-                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p2_categories", categories), Updates.set("p2_ready", true)))
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("p2_ready", true))
             }
             
-            val updatedDuel = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
-            if (updatedDuel.getBoolean("p1_ready") == true && updatedDuel.getBoolean("p2_ready") == true) {
-                // Both ready! Start game logic
-                val p1 = updatedDuel.getString("player1") ?: ""
-                val p2 = updatedDuel.getString("player2") ?: ""
-
-                val allCats = (updatedDuel.get("p1_categories") as List<String>) + (updatedDuel.get("p2_categories") as List<String>)
+            val updated = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
+            if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
+                // Both ready, start!
+                val p1 = updated.getString("player1") ?: ""
+                val p2 = updated.getString("player2") ?: ""
                 
-                // Create a transient room for the duel
-                val code = duelId.takeLast(5)
-                val room = GameRoom(code, onlineUsers[p1]!!) 
-                room.players.add(Player(p1, onlineUsers[p1]!!))
-                room.players.add(Player(p2, onlineUsers[p2]!!))
+                // Fetch random questions for the duel
+                val questions = fetchQuestions(questionsColl, 10, listOf("Όλες"), listOf("Όλα"))
+                val qJson = gson.toJson(questions)
                 
-                val qCount = 5 
-                val questionsList = mutableListOf<Document>()
-                allCats.distinct().forEach { cat ->
-                    questionsList.addAll(fetchQuestions(questionsColl, qCount, listOf(cat), listOf("Όλα")))
-                }
-                
-                room.questions = questionsList.shuffled()
-                room.isSpeedMode = true 
-                room.timerSeconds = 15
-                room.isGameRunning = true
-                rooms[code] = room
-                
-                room.broadcast(GameMessage(MessageType.START_GAME, "Server", "15"))
-                CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
+                onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson))))
+                onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson))))
             }
         }
-
+        
         MessageType.DUEL_FINISH -> {
             val sender = msg.sender
             val stats = msg.content?.split("|") ?: return
@@ -852,26 +851,27 @@ suspend fun fetchQuestions(coll: MongoCollection<Document>, count: Int, cats: Li
 suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession) {
     if (!::database.isInitialized) return
     val friendsDoc = database.getCollection<Document>("friends").find(Filters.eq("_id", user)).firstOrNull()
-    val friendNames = friendsDoc?.get("friends") as? List<*> ?: emptyList<String>()
+    val friendsList = (friendsDoc?.get("friends") as? List<*>)?.map { it.toString() } ?: emptyList()
     
-    val friends = friendNames.map { name ->
-        val n = name.toString()
-        FriendInfo(n, onlineUsers.containsKey(n))
-    }
+    val friends = friendsList.map { FriendInfo(it, onlineUsers.containsKey(it)) }
     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.FRIEND_LIST, "Server", gson.toJson(friends)))))
 }
 
 suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession) {
     if (!::database.isInitialized) return
     try {
-        val requestsDoc = database.getCollection<Document>("requests").find(Filters.eq("_id", user)).firstOrNull()
+        val requestsColl = database.getCollection<Document>("requests")
         
-        val incoming = (requestsDoc?.get("incoming") as? List<*>)?.map { it.toString() } ?: emptyList()
-        val outgoing = (requestsDoc?.get("outgoing") as? List<*>)?.map { it.toString() } ?: emptyList()
-
+        // Incoming: requests where target is current user
+        val incomingDoc = requestsColl.find(Filters.eq("_id", user)).firstOrNull()
+        val incoming = (incomingDoc?.get("incoming") as? List<*>)?.map { it.toString() } ?: emptyList()
+        
+        // Outgoing: requests where current user is in the requesters list
+        val outgoingDoc = requestsColl.find(Filters.eq("_id", user)).firstOrNull()
+        val outgoing = (outgoingDoc?.get("outgoing") as? List<*>)?.map { it.toString() } ?: emptyList()
+        
         val response = RequestLists(incoming, outgoing)
-        val jsonResponse = gson.toJson(response)
-        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REQUEST_LIST, "Server", jsonResponse))))
+        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(response)))))
         println("SERVER: Sync RequestList for $user -> In: ${incoming.size}, Out: ${outgoing.size}")
     } catch (e: Exception) {
         println("SERVER ERROR (sendRequestList): ${e.message}")
@@ -935,16 +935,11 @@ suspend fun watchDatabaseChanges() {
 
 suspend fun runGameLoop(room: GameRoom) {
     while (room.currentQuestionIndex < room.questions.size && room.isGameRunning) {
-        // In survival mode, check if we still have players
-        if (room.isSurvivalMode && room.players.none { !it.isEliminated }) {
-            break
-        }
-        
         sendQuestionAndWait(room, room.questions[room.currentQuestionIndex])
         room.currentQuestionIndex++
     }
 
-    if (room.isSuddenDeathEnabled && room.isGameRunning && !room.isSurvivalMode) {
+    if (room.isSuddenDeathEnabled && room.isGameRunning) {
         val sorted = room.players.sortedByDescending { it.score }
         if (sorted.size >= 2 && sorted[0].score == sorted[1].score && sorted[0].score > 0) {
             room.isSuddenDeathActive = true
