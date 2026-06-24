@@ -60,7 +60,8 @@ enum class MessageType {
     SYNC_OFFLINE_SCORES, SYNC_OFFLINE_SCORES_RESPONSE,
     CHECK_NEW_QUESTIONS, NEW_QUESTIONS_DATA,
     GET_DISCOVER_PLAYERS, DISCOVER_PLAYERS_DATA,
-    USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS
+    USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS,
+    DUEL_CHALLENGE, DUEL_CHALLENGE_RECEIVED, DUEL_ACCEPT, DUEL_SETUP, DUEL_START, DUEL_FINISH, DUEL_RESULT, DUEL_HISTORY_REQUEST, DUEL_HISTORY_DATA
 }
 
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
@@ -201,6 +202,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
     val questionsColl = database.getCollection<Document>("questions")
     val offlineScoresColl = database.getCollection<Document>("offline_scores")
     val pendingColl = database.getCollection<Document>("pending_messages")
+    val duelsColl = database.getCollection<Document>("duels")
+    val duelStatsColl = database.getCollection<Document>("duel_stats")
 
     when (msg.type) {
 
@@ -658,7 +661,157 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DISCOVER_PLAYERS_DATA, "Server", gson.toJson(discoverable)))))
         }
 
+        MessageType.DUEL_CHALLENGE -> {
+            val host = msg.sender
+            val content = msg.content ?: return
+            val parts = content.split("|")
+            val target = parts.getOrNull(0) ?: return
+            val isLive = parts.getOrNull(1) == "LIVE"
+            
+            val challengeStr = "$host|$isLive"
+            val targetSession = onlineUsers[target]
+            if (targetSession != null) {
+                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_CHALLENGE_RECEIVED, "Server", challengeStr))))
+            } else {
+                pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
+            }
+        }
+
+        MessageType.DUEL_ACCEPT -> {
+            val acceptor = msg.sender
+            val host = msg.content?.split("|")?.getOrNull(0) ?: return
+            
+            // Generate unique duel ID
+            val duelId = "DUEL_${System.currentTimeMillis()}_${(1000..9999).random()}"
+            
+            val duelDoc = Document("_id", duelId)
+                .append("player1", host)
+                .append("player2", acceptor)
+                .append("status", "SETUP")
+                .append("p1_ready", false)
+                .append("p2_ready", false)
+                .append("createdAt", Date())
+            
+            duelsColl.insertOne(duelDoc)
+            
+            val responseStr = "$duelId|$host|$acceptor"
+            onlineUsers[host]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
+        }
+
+        MessageType.DUEL_START -> {
+            val sender = msg.sender
+            val content = msg.content ?: return
+            val parts = content.split("|")
+            val duelId = parts.getOrNull(0) ?: return
+            val categories = parts.getOrNull(1)?.split(",") ?: emptyList()
+            
+            val duel = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
+            
+            if (sender == duel.getString("player1")) {
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_categories", categories), Updates.set("p1_ready", true)))
+            } else {
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p2_categories", categories), Updates.set("p2_ready", true)))
+            }
+            
+            val updatedDuel = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
+            if (updatedDuel.getBoolean("p1_ready") == true && updatedDuel.getBoolean("p2_ready") == true) {
+                // Both ready! Start game logic
+                val p1 = updatedDuel.getString("player1") ?: ""
+                val p2 = updatedDuel.getString("player2") ?: ""
+
+                val allCats = (updatedDuel.get("p1_categories") as List<String>) + (updatedDuel.get("p2_categories") as List<String>)
+                
+                // Create a transient room for the duel
+                val code = duelId.takeLast(5)
+                val room = GameRoom(code, onlineUsers[p1]!!) 
+                room.players.add(Player(p1, onlineUsers[p1]!!))
+                room.players.add(Player(p2, onlineUsers[p2]!!))
+                
+                val qCount = 5 
+                val questionsList = mutableListOf<Document>()
+                allCats.distinct().forEach { cat ->
+                    questionsList.addAll(fetchQuestions(questionsColl, qCount, listOf(cat), listOf("Όλα")))
+                }
+                
+                room.questions = questionsList.shuffled()
+                room.isSpeedMode = true 
+                room.timerSeconds = 15
+                room.isGameRunning = true
+                rooms[code] = room
+                
+                room.broadcast(GameMessage(MessageType.START_GAME, "Server", "15"))
+                CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
+            }
+        }
+
+        MessageType.DUEL_FINISH -> {
+            val sender = msg.sender
+            val stats = msg.content?.split("|") ?: return
+            val score = stats.getOrNull(0)?.toIntOrNull() ?: 0
+            val time = stats.getOrNull(1)?.toLongOrNull() ?: 0
+            
+            // Find active duel for this player
+            val duel = duelsColl.find(Filters.and(
+                Filters.or(Filters.eq("player1", sender), Filters.eq("player2", sender)),
+                Filters.eq("status", "SETUP") // Still in setup phase technically until finished
+            )).firstOrNull() ?: return
+            
+            val duelId = duel.getString("_id")
+            if (sender == duel.getString("player1")) {
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_score", score), Updates.set("p1_time", time), Updates.set("p1_finished", true)))
+            } else {
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p2_score", score), Updates.set("p2_time", time), Updates.set("p2_finished", true)))
+            }
+            
+            val updated = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
+            if (updated.getBoolean("p1_finished") == true && updated.getBoolean("p2_finished") == true) {
+                // Determine winner
+                val s1 = updated.getInteger("p1_score") ?: 0
+                val s2 = updated.getInteger("p2_score") ?: 0
+                val t1 = updated.getLong("p1_time") ?: 0L
+                val t2 = updated.getLong("p2_time") ?: 0L
+                
+                val p1 = updated.getString("player1") ?: ""
+                val p2 = updated.getString("player2") ?: ""
+                
+                var winner = ""
+                if (s1 > s2) winner = p1
+                else if (s2 > s1) winner = p2
+                else {
+                    // Draw or check time
+                    if (t1 < t2) winner = p1
+                    else if (t2 < t1) winner = p2
+                }
+                
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("status", "COMPLETED"), Updates.set("winner", winner)))
+                
+                // Update Stats
+                updateDuelStats(duelStatsColl, p1, p2, winner)
+                
+                val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
+                onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
+                onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
+            }
+        }
+        
+        MessageType.DUEL_HISTORY_REQUEST -> {
+            val stats = duelStatsColl.find(Filters.eq("_id", msg.sender)).firstOrNull()
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_HISTORY_DATA, "Server", gson.toJson(stats ?: Document("_id", msg.sender).append("wins", 0).append("losses", 0).append("draws", 0))))))
+        }
+
         else -> {}
+    }
+}
+
+suspend fun updateDuelStats(coll: MongoCollection<Document>, p1: String, p2: String, winner: String) {
+    if (winner == "") {
+        coll.updateOne(Filters.eq("_id", p1), Updates.combine(Updates.inc("draws", 1), Updates.setOnInsert("_id", p1)), UpdateOptions().upsert(true))
+        coll.updateOne(Filters.eq("_id", p2), Updates.combine(Updates.inc("draws", 1), Updates.setOnInsert("_id", p2)), UpdateOptions().upsert(true))
+    } else {
+        val loser = if (winner == p1) p2 else p1
+        coll.updateOne(Filters.eq("_id", winner), Updates.combine(Updates.inc("wins", 1), Updates.setOnInsert("_id", winner)), UpdateOptions().upsert(true))
+        coll.updateOne(Filters.eq("_id", loser), Updates.combine(Updates.inc("losses", 1), Updates.setOnInsert("_id", loser)), UpdateOptions().upsert(true))
     }
 }
 
@@ -724,8 +877,13 @@ suspend fun watchDatabaseChanges() {
             try {
                 val requestsColl = database.getCollection<Document>("requests")
                 requestsColl.watch().collect { event ->
-                    println("SERVER: DB Change detected in Requests for player: ${event.documentKey?.get("_id")}")
-                    val userId = event.documentKey?.get("_id")?.asString()?.value
+                    val docId = event.documentKey?.get("_id")
+                    val userId = when {
+                        docId?.isString == true -> docId.asString().value
+                        docId?.isObjectId == true -> docId.asObjectId().value.toString()
+                        else -> null
+                    }
+                    println("SERVER: DB Change detected in Requests for player: $userId")
                     if (userId != null) {
                         onlineUsers[userId]?.let { sendRequestList(userId, it) }
                     }
@@ -740,8 +898,13 @@ suspend fun watchDatabaseChanges() {
             try {
                 val friendsColl = database.getCollection<Document>("friends")
                 friendsColl.watch().collect { event ->
-                    println("SERVER: DB Change detected in Friends for player: ${event.documentKey?.get("_id")}")
-                    val userId = event.documentKey?.get("_id")?.asString()?.value
+                    val docId = event.documentKey?.get("_id")
+                    val userId = when {
+                        docId?.isString == true -> docId.asString().value
+                        docId?.isObjectId == true -> docId.asObjectId().value.toString()
+                        else -> null
+                    }
+                    println("SERVER: DB Change detected in Friends for player: $userId")
                     if (userId != null) {
                         onlineUsers[userId]?.let { sendFriendList(userId, it) }
                     }
