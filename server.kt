@@ -595,18 +595,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.APPROVE_QUESTION -> {
             if (ADMIN_USERS.contains(msg.sender)) {
                 try {
-                    val contentDoc = Document.parse(msg.content)
-                    val rawId = contentDoc["_id"]?.toString() ?: return
-                    
-                    // Robust extraction of 24-character hex string
-                    val cleanId = if (rawId.contains("$oid")) {
-                        rawId.substringAfter("$oid\": \"").substringBefore("\"")
-                             .substringAfter("$oid=").substringBefore("}")
-                             .trim()
-                    } else {
-                        val match = Regex("[a-fA-F0-9]{24}").find(rawId)
-                        match?.value ?: rawId.trim()
-                    }
+                    // Extract ID directly from content string if possible, or parse as JSON
+                    val rawContent = msg.content ?: return
+                    val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
+                    val cleanId = idMatch?.value ?: return
                     
                     val id = org.bson.types.ObjectId(cleanId)
                     
@@ -614,8 +606,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
                     if (result.deletedCount > 0) {
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
+                        println("SERVER: Question $cleanId APPROVED and removed from suggestions.")
                     } else {
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε."))))
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε (ID: $cleanId)."))))
                     }
                 } catch (e: Exception) {
                     println("APPROVE ERROR: ${e.message} | Content: ${msg.content}")
@@ -627,27 +620,18 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.REJECT_QUESTION -> {
             if (ADMIN_USERS.contains(msg.sender)) {
                 try {
-                    val contentDoc = Document.parse(msg.content)
-                    val rawId = contentDoc["_id"]?.toString() ?: return
-                    
-                    // Robust extraction of 24-character hex string
-                    val cleanId = if (rawId.contains("$oid")) {
-                        rawId.substringAfter("$oid\": \"").substringBefore("\"")
-                             .substringAfter("$oid=").substringBefore("}")
-                             .trim()
-                    } else {
-                        val match = Regex("[a-fA-F0-9]{24}").find(rawId)
-                        match?.value ?: rawId.trim()
-                    }
+                    val rawContent = msg.content ?: return
+                    val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
+                    val cleanId = idMatch?.value ?: return
                     
                     val id = org.bson.types.ObjectId(cleanId)
-                    val reason = contentDoc.getString("reason") ?: ""
                     
                     val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
                     if (result.deletedCount > 0) {
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "REJECTED"))))
+                        println("SERVER: Question $cleanId REJECTED and removed from suggestions.")
                     } else {
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε."))))
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε (ID: $cleanId)."))))
                     }
                 } catch (e: Exception) {
                     println("REJECT ERROR: ${e.message} | Content: ${msg.content}")
