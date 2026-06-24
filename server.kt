@@ -22,8 +22,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "2.0"
-const val LATEST_VERSION_CODE = 11
+const val LATEST_VERSION_NAME = "2.1"
+const val LATEST_VERSION_CODE = 12
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
@@ -54,13 +54,13 @@ enum class MessageType {
     CHALLENGE_FRIEND, CHALLENGE_RECEIVED, CHALLENGE_RESULT,
     GET_LEADERBOARD, LEADERBOARD_DATA,
     UPLOAD_QUESTIONS, GET_SOLO_QUESTIONS, SOLO_QUESTIONS_DATA,
+    // Offline Sync & Question Moderation
     SUGGEST_QUESTION, SUGGEST_QUESTION_RESPONSE,
     GET_PENDING_QUESTIONS, PENDING_QUESTIONS_DATA,
     APPROVE_QUESTION, REJECT_QUESTION, QUESTION_MODERATION_RESPONSE,
     SYNC_OFFLINE_SCORES, SYNC_OFFLINE_SCORES_RESPONSE,
     CHECK_NEW_QUESTIONS, NEW_QUESTIONS_DATA,
     GET_DISCOVER_PLAYERS, DISCOVER_PLAYERS_DATA,
-    USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS,
     DUEL_CHALLENGE, DUEL_CHALLENGE_RECEIVED, DUEL_ACCEPT, DUEL_SETUP, DUEL_START, DUEL_FINISH, DUEL_RESULT, DUEL_HISTORY_REQUEST, DUEL_HISTORY_DATA,
     REMOVE_FRIEND
 }
@@ -75,11 +75,7 @@ data class Player(
     var hasAnswered: Boolean = false,
     var lastAnswerIndex: Int = -1,
     var isEliminated: Boolean = false,
-    var totalTime: Long = 0,
-    var lives: Int = 3,
-    var doublePointsActive: Boolean = false,
-    var shieldActive: Boolean = false,
-    val powerups: MutableMap<String, Int> = mutableMapOf("50/50" to 1, "DoublePoints" to 1, "Shield" to 1)
+    var totalTime: Long = 0
 )
 data class FriendInfo(val name: String, var isOnline: Boolean)
 data class RequestLists(val incoming: List<String>, val outgoing: List<String>)
@@ -92,14 +88,11 @@ lateinit var database: MongoDatabase
 class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession) {
     val players = CopyOnWriteArrayList<Player>()
     var questions: List<Document> = emptyList()
-    var extraQuestions: List<Document> = emptyList()
     var currentQuestionIndex = 0
     var timerSeconds = 20
     var waitingForAnswers = false
     var isSuddenDeathEnabled = true
     var isSpeedMode = false
-    var isSurvivalMode = false
-    var powerupsEnabled = false
     var isSuddenDeathActive = false
     var isGameRunning = false
     var gameJob: Job? = null
@@ -469,24 +462,27 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val setup: Map<String, Any> = gson.fromJson(msg.content, object : TypeToken<Map<String, Any>>() {}.type)
 
                 val count = (setup["count"] as? Double)?.toInt() ?: 10
-                val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
-                val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
+                
+                // HOST-DRIVEN QUESTIONS: Server receives questions from Host and relays them
+                val hostQuestions = setup["questions"] as? List<Map<String, Any>>
+                if (hostQuestions != null) {
+                    room.questions = hostQuestions.map { Document(it) }
+                } else {
+                    // Fallback to DB if something went wrong, though we want to avoid this
+                    val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
+                    val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
+                    room.questions = fetchQuestions(questionsColl, count, categories, difficulties)
+                }
 
-                room.questions = fetchQuestions(questionsColl, count, categories, difficulties)
-                room.extraQuestions = fetchQuestions(questionsColl, 10, listOf("Όλες"), listOf("Όλα"))
                 room.timerSeconds = (setup["timer"] as? Double)?.toInt() ?: 20
                 room.isSuddenDeathEnabled = setup["isSuddenDeath"] as? Boolean ?: true
                 room.isSpeedMode = setup["isSpeedMode"] as? Boolean ?: false
-                room.isSurvivalMode = setup["survival"] as? Boolean ?: false
-                room.powerupsEnabled = setup["powerups"] as? Boolean ?: false
                 room.isGameRunning = true
                 room.currentQuestionIndex = 0
                 room.isSuddenDeathActive = false
 
                 room.players.forEach { 
                     it.score = 0; it.correctCount = 0; it.wrongCount = 0; it.totalTime = 0; it.isEliminated = false
-                    it.lives = 3; it.doublePointsActive = false; it.shieldActive = false
-                    it.powerups["50/50"] = 1; it.powerups["DoublePoints"] = 1; it.powerups["Shield"] = 1
                 }
 
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
@@ -507,29 +503,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.USE_POWERUP -> {
-            val room = rooms.values.find { r -> r.players.any { it.session == session } }
-            val player = room?.players?.find { it.session == session }
-            if (room != null && room.isGameRunning && room.powerupsEnabled && player != null && !player.isEliminated) {
-                val type = msg.content ?: return
-                val count = player.powerups[type] ?: 0
-                if (count > 0) {
-                    player.powerups[type] = count - 1
-                    when (type) {
-                        "50/50" -> {
-                            // Effect is handled on client, server just broadcasts it
-                            room.broadcast(GameMessage(MessageType.POWERUP_EFFECT, player.name, "50/50"))
-                        }
-                        "DoublePoints" -> {
-                            player.doublePointsActive = true
-                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.POWERUP_EFFECT, "Server", "DoublePoints|ACTIVE"))))
-                        }
-                        "Shield" -> {
-                            player.shieldActive = true
-                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.POWERUP_EFFECT, "Server", "Shield|ACTIVE"))))
-                        }
-                    }
-                }
-            }
+            // Powerups REMOVED
         }
 
         MessageType.SYNC_OFFLINE_SCORES -> {
@@ -993,8 +967,11 @@ suspend fun runGameLoop(room: GameRoom) {
             room.players.forEach { if (it.score < topScore) it.isEliminated = true }
 
             var sdIdx = 0
-            while (room.players.count { !it.isEliminated } > 1 && sdIdx < room.extraQuestions.size && room.isGameRunning) {
-                val q = room.extraQuestions[sdIdx]
+            // For Sudden Death, we now use the provided questions or a generic fallback if needed
+            val sdQuestions = fetchQuestions(database.getCollection<Document>("questions"), 10, listOf("Όλες"), listOf("Όλα"))
+            
+            while (room.players.count { !it.isEliminated } > 1 && sdIdx < sdQuestions.size && room.isGameRunning) {
+                val q = sdQuestions[sdIdx]
                 sendQuestionAndWait(room, q)
                 val correctIdx = (q.getInteger("correctAnswerIndex") ?: 0)
                 room.players.filter { !it.isEliminated }.forEach { if (it.lastAnswerIndex != correctIdx) it.isEliminated = true }
@@ -1026,43 +1003,17 @@ suspend fun sendQuestionAndWait(room: GameRoom, question: Document) {
         if (p.isEliminated) return@forEach
 
         if (p.lastAnswerIndex == correctIdx) {
-            val points = if (p.doublePointsActive) 2 else 1
-            if (!room.isSuddenDeathActive) p.score += points
+            if (!room.isSuddenDeathActive) p.score += 1
             p.correctCount++
-            p.doublePointsActive = false // Reset for next round
         } else {
             p.wrongCount++
-            if (room.isSurvivalMode) {
-                if (p.shieldActive) {
-                    p.shieldActive = false // Shield protects once
-                } else {
-                    p.lives--
-                    if (p.lives <= 0) {
-                        p.isEliminated = true
-                        p.lives = 0
-                    }
-                }
-            }
         }
     }
 
     val options = question.get("options", List::class.java) as? List<String> ?: listOf()
-    val statusText = if (room.isSurvivalMode) {
-        val stats = room.players.joinToString("\n") { "${it.name}: ❤️${it.lives}${if (it.isEliminated) " (OUT)" else ""}" }
-        "Σωστή απάντηση: ${options.getOrNull(correctIdx) ?: ""}\n\n$stats"
-    } else {
-        "Σωστή απάντηση: ${options.getOrNull(correctIdx) ?: ""}"
-    }
+    val statusText = "Σωστή απάντηση: ${options.getOrNull(correctIdx) ?: ""}"
     room.broadcast(GameMessage(MessageType.RESULT, "Server", statusText))
     delay(4000)
-    
-    // Send updated stats (lives/powerups) to each player if enabled
-    if (room.isSurvivalMode || room.powerupsEnabled) {
-        room.players.forEach { p ->
-            val pData = mapOf("lives" to p.lives, "powerups" to p.powerups)
-            try { p.session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PLAYER_STATS, "Server", gson.toJson(pData))))) } catch (e: Exception) {}
-        }
-    }
 
     room.broadcast(GameMessage(MessageType.LEADERBOARD, "Server", ""))
     delay(1000)
