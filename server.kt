@@ -124,9 +124,51 @@ suspend fun initDatabase() {
         val client = MongoClient.create(MONGODB_URI)
         database = client.getDatabase("playwithme")
         println("SERVER: DATABASE CONNECTED SUCCESSFULLY")
+        
+        // Perform one-time migration
+        migrateQuestionsToCategories()
     } catch (e: Exception) {
         println("DATABASE ERROR: ${e.message}")
     }
+}
+
+suspend fun migrateQuestionsToCategories() {
+    val mainColl = database.getCollection<Document>("questions")
+    val allQuestions = mainColl.find().toList()
+    
+    if (allQuestions.isEmpty()) {
+        println("SERVER MIGRATION: No questions found in generic 'questions' collection. Skipping.")
+        return
+    }
+
+    println("SERVER MIGRATION: Starting move of ${allQuestions.size} questions to categorized collections...")
+    
+    var migratedCount = 0
+    val groupedByCat = allQuestions.groupBy { it.getString("category") ?: "Άλλα" }
+    
+    groupedByCat.forEach { (category, questions) ->
+        val targetColl = getQuestionsCollection(category)
+        
+        // Prevent duplicates in target: check existing texts
+        val existingTexts = targetColl.find().projection(Document("text", 1)).toList()
+            .mapNotNull { it.getString("text") }.toSet()
+            
+        val toInsert = questions.filter { q -> 
+            val text = q.getString("text")
+            text != null && !existingTexts.contains(text)
+        }
+        
+        if (toInsert.isNotEmpty()) {
+            targetColl.insertMany(toInsert)
+            migratedCount += toInsert.size
+        }
+    }
+
+    println("SERVER MIGRATION: Successfully inserted $migratedCount unique questions into categorized collections.")
+    
+    // Now delete the old generic collection
+    mainColl.drop()
+    println("SERVER MIGRATION: Generic 'questions' collection has been DELETED.")
 }
 
 fun main() {
@@ -183,7 +225,15 @@ suspend fun canonicalName(usersColl: MongoCollection<Document>, raw: String): St
 }
 
 fun getQuestionsCollection(category: String): MongoCollection<Document> {
-    val collectionName = if (category == "Όλες" || category == "Όλα") "questions" else "questions_$category"
+    val sanitized = category.trim()
+    val collectionName = if (sanitized == "Όλες" || sanitized == "Όλα") {
+        // This is a virtual collection name for fetching logic, 
+        // but for specific inserts/moves, we need a real one.
+        // We shouldn't be inserting into "All".
+        "questions_Γενικές Γνώσεις" 
+    } else {
+        "questions_$sanitized"
+    }
     return database.getCollection<Document>(collectionName)
 }
 
@@ -314,7 +364,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             requestsColl.updateOne(Filters.eq("_id", user), Updates.pull("incoming", requester))
             requestsColl.updateOne(Filters.eq("_id", requester), Updates.pull("outgoing", user))
 
-            // 2. Add to friends folders (BIDIRECTIONAL)
+            // 2. Add to friends folders (BIDIRECTIONAL) using a clean list layout
             friendsColl.updateOne(
                 Filters.eq("_id", user),
                 Updates.combine(Updates.addToSet("friends", requester), Updates.setOnInsert("_id", user)),
@@ -326,7 +376,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 UpdateOptions().upsert(true)
             )
 
-            // 3. Sync both
+            // 3. Sync both players immediately with fresh DB reads
             sendFriendList(user, session)
             sendRequestList(user, session)
             onlineUsers[requester]?.let {
@@ -565,31 +615,23 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         // ==================== SOLO QUESTIONS ====================
         MessageType.GET_SOLO_QUESTIONS -> {
             val allSoloQuestions = mutableListOf<Document>()
-            
-            // Fetch questions across ALL categories to ensure we have enough
             val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
             
             diffCounts.forEach { (diff, targetCount) ->
                 val collected = mutableListOf<Document>()
-                // First try across all actual categories
+                // Fetch from categorized collections only
                 for (cat in ALL_CATEGORIES.shuffled()) {
                     if (collected.size >= targetCount) break
                     val fromCat = getQuestionsCollection(cat).find(Filters.eq("difficulty", diff)).toList()
                     collected.addAll(fromCat)
                 }
                 
-                // If still not enough, try the catch-all "questions" collection
-                if (collected.size < targetCount) {
-                    val fromMain = database.getCollection<Document>("questions").find(Filters.eq("difficulty", diff)).toList()
-                    collected.addAll(fromMain)
-                }
-                
                 allSoloQuestions.addAll(collected.distinctBy { it.getString("text") }.shuffled().take(targetCount))
             }
             
-            // Final fallback: if no questions found at all, just take anything
+            // Final fallback: if no questions found at all, try any category
             if (allSoloQuestions.isEmpty()) {
-                val fallback = database.getCollection<Document>("questions").find().limit(100).toList()
+                val fallback = getQuestionsCollection("Γενικές Γνώσεις").find().limit(100).toList()
                 allSoloQuestions.addAll(fallback)
             }
             
@@ -615,23 +657,25 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.APPROVE_QUESTION -> {
             if (ADMIN_USERS.contains(msg.sender)) {
                 try {
-                    // Extract ID directly from content string if possible, or parse as JSON
                     val rawContent = msg.content ?: return
                     val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
                     val cleanId = idMatch?.value ?: return
                     
                     val id = org.bson.types.ObjectId(cleanId)
                     
-                    // NEW LOGIC: Admin app saves it locally first, then tells server to DELETE from suggestions
+                    // NEW LOGIC: Just delete from suggestions. 
+                    // The Admin app already saved the question locally and will sync it back to the proper category collection later.
                     val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
+                    
                     if (result.deletedCount > 0) {
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
-                        println("SERVER: Question $cleanId APPROVED and removed from suggestions.")
+                        println("SERVER: Question $cleanId APPROVED and REMOVED from suggestions.")
                     } else {
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε (ID: $cleanId)."))))
+                        // Fallback: try searching in all collections just in case it's misrouted
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε στις προτάσεις."))))
                     }
                 } catch (e: Exception) {
-                    println("APPROVE ERROR: ${e.message} | Content: ${msg.content}")
+                    println("APPROVE ERROR: ${e.message}")
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα έγκρισης: ${e.message}"))))
                 }
             }
@@ -834,25 +878,15 @@ suspend fun fetchQuestions(coll: MongoCollection<Document>, count: Int, cats: Li
             Filters.`in`("difficulty", diffs)
         }
         
-        // 1. Try category specific collection
+        // Strictly try category specific collection
         val fromCat = getQuestionsCollection(cat).find(filter).toList()
         allQuestions.addAll(fromCat)
-        
-        // 2. Fallback: Try general 'questions' collection if cat-specific was empty
-        if (fromCat.isEmpty()) {
-            val generalFilter = if (filter == Filters.empty()) {
-                Filters.eq("category", cat)
-            } else {
-                Filters.and(Filters.eq("category", cat), filter)
-            }
-            allQuestions.addAll(database.getCollection<Document>("questions").find(generalFilter).toList())
-        }
     }
     
-    // Final sanity fallback: if no questions found at all, just grab some from the main collection
+    // Final sanity fallback: if no questions found at all, grab from 'Γενικές Γνώσεις'
     if (allQuestions.isEmpty()) {
-        println("SERVER: fetchQuestions returned 0 results for cats: $cats, diffs: $diffs. Falling back to general.")
-        allQuestions.addAll(database.getCollection<Document>("questions").find().limit(count * 2).toList())
+        println("SERVER: fetchQuestions returned 0 results for cats: $cats, diffs: $diffs. Falling back to General.")
+        allQuestions.addAll(getQuestionsCollection("Γενικές Γνώσεις").find().limit(count * 2).toList())
     }
     
     return allQuestions.distinctBy { it.getString("text") }.shuffled().take(count)
