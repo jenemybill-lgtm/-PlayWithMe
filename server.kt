@@ -27,12 +27,23 @@ const val LATEST_VERSION_CODE = 11
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
-val ADMIN_USERS = setOf("jenemybill", "admin")
+val ADMIN_USERS = setOf("jenemybill", "admin", "basil")
 val lastSubmissionTime = ConcurrentHashMap<String, Long>()
 
 fun containsProfanity(text: String): Boolean {
-    val profanities = listOf("μαλακα", "πουστη", "γαμω", "σκατα") // Basic list for demonstration
+    val profanities = listOf(
+        "μαλακα", "πουστη", "γαμω", "σκατα", "πουτανα", "ρχιδι", "μουνι", "κωλο",
+        "malaka", "pousti", "gamo", "skata", "poutana", "arxidi", "mouni", "kolo"
+    )
     val normalized = text.lowercase(Locale.ROOT)
+        .replace("0", "o")
+        .replace("1", "i")
+        .replace("3", "e")
+        .replace("4", "a")
+        .replace("5", "s")
+        .replace("7", "t")
+        .replace("8", "b")
+
     return profanities.any { normalized.contains(it) }
 }
 
@@ -195,6 +206,18 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.REGISTER -> {
             val name = msg.content?.trim() ?: return
+            
+            // Input Validation
+            if (name.length < 3 || name.length > 20 || !name.all { it.isLetterOrDigit() || it == '_' }) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "INVALID_FORMAT"))))
+                return
+            }
+
+            if (containsProfanity(name)) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "PROFANITY"))))
+                return
+            }
+
             val existing = usersColl.find(Filters.regex("name", "^${Pattern.quote(name)}$", "i")).firstOrNull()
             if (existing != null) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "EXISTS"))))
@@ -235,30 +258,56 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val officialTarget = targetDoc.getString("name") ?: targetRaw
             if (user == officialTarget) return
 
-            // Check if already friends using new structure
+            // 1. Check if already friends
             val myFriendsDoc = friendsColl.find(Filters.eq("_id", user)).firstOrNull()
             val alreadyFriends = (myFriendsDoc?.get("friends") as? List<*>)?.contains(officialTarget) == true
-            
             if (alreadyFriends) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Είστε ήδη φίλοι!"))))
                 return
             }
 
-            // Update sender's OUTGOING folder
-            requestsColl.updateOne(
-                Filters.eq("_id", user),
-                Updates.combine(Updates.addToSet("outgoing", officialTarget), Updates.setOnInsert("_id", user)),
-                UpdateOptions().upsert(true)
-            )
+            // 2. AUTO-ACCEPT LOGIC: Check if target has already sent a request to ME
+            val targetRequestsDoc = requestsColl.find(Filters.eq("_id", officialTarget)).firstOrNull()
+            val targetSentToMe = (targetRequestsDoc?.get("outgoing") as? List<*>)?.contains(user) == true
 
-            // Update target's INCOMING folder
-            requestsColl.updateOne(
-                Filters.eq("_id", officialTarget),
-                Updates.combine(Updates.addToSet("incoming", user), Updates.setOnInsert("_id", officialTarget)),
-                UpdateOptions().upsert(true)
-            )
+            if (targetSentToMe) {
+                // They already sent a request to me, so just make us friends!
+                // Remove the incoming/outgoing requests
+                requestsColl.updateOne(Filters.eq("_id", officialTarget), Updates.pull("outgoing", user))
+                requestsColl.updateOne(Filters.eq("_id", user), Updates.pull("incoming", officialTarget))
 
-            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε!"))))
+                // Add to both friends lists
+                friendsColl.updateOne(Filters.eq("_id", user), Updates.combine(Updates.addToSet("friends", officialTarget), Updates.setOnInsert("_id", user)), UpdateOptions().upsert(true))
+                friendsColl.updateOne(Filters.eq("_id", officialTarget), Updates.combine(Updates.addToSet("friends", user), Updates.setOnInsert("_id", officialTarget)), UpdateOptions().upsert(true))
+
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Τώρα είστε φίλοι με τον $officialTarget!"))))
+                
+                // Sync both players
+                sendFriendList(user, session)
+                sendRequestList(user, session)
+                onlineUsers[officialTarget]?.let {
+                    sendFriendList(officialTarget, it)
+                    sendRequestList(officialTarget, it)
+                }
+            } else {
+                // Standard request logic
+                requestsColl.updateOne(
+                    Filters.eq("_id", user),
+                    Updates.combine(Updates.addToSet("outgoing", officialTarget), Updates.setOnInsert("_id", user)),
+                    UpdateOptions().upsert(true)
+                )
+                requestsColl.updateOne(
+                    Filters.eq("_id", officialTarget),
+                    Updates.combine(Updates.addToSet("incoming", user), Updates.setOnInsert("_id", officialTarget)),
+                    UpdateOptions().upsert(true)
+                )
+
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε!"))))
+                
+                // Sync both players
+                sendRequestList(user, session)
+                onlineUsers[officialTarget]?.let { sendRequestList(officialTarget, it) }
+            }
         }
 
         MessageType.ACCEPT_REQUEST -> {
@@ -266,9 +315,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val requester = msg.content ?: return
 
             // 1. Remove from folders
-            // Remove from my incoming
             requestsColl.updateOne(Filters.eq("_id", user), Updates.pull("incoming", requester))
-            // Remove from requester's outgoing
             requestsColl.updateOne(Filters.eq("_id", requester), Updates.pull("outgoing", user))
 
             // 2. Add to friends folders
@@ -282,6 +329,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 Updates.combine(Updates.addToSet("friends", user), Updates.setOnInsert("_id", requester)),
                 UpdateOptions().upsert(true)
             )
+
+            // 3. Sync both
+            sendFriendList(user, session)
+            sendRequestList(user, session)
+            onlineUsers[requester]?.let {
+                sendFriendList(requester, it)
+                sendRequestList(requester, it)
+            }
         }
 
         MessageType.REJECT_REQUEST -> {
@@ -291,6 +346,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             // Remove from folders
             requestsColl.updateOne(Filters.eq("_id", user), Updates.pull("incoming", requester))
             requestsColl.updateOne(Filters.eq("_id", requester), Updates.pull("outgoing", user))
+
+            // Sync both
+            sendRequestList(user, session)
+            onlineUsers[requester]?.let { sendRequestList(requester, it) }
         }
 
         MessageType.INVITE -> {
@@ -458,15 +517,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             try {
                 val now = System.currentTimeMillis()
                 val lastTime = lastSubmissionTime[msg.sender] ?: 0L
-                if (now - lastTime < 30000) { // 30 seconds rate limit
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Περίμενε λίγο πριν την επόμενη υποβολή!"))))
+                if (now - lastTime < 60000) { // Increased to 60 seconds rate limit
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Περίμενε 1 λεπτό πριν την επόμενη υποβολή!"))))
                     return
                 }
 
                 val suggestion = Document.parse(msg.content)
                 val questionText = suggestion.getString("text") ?: ""
-                if (containsProfanity(questionText)) {
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση περιέχει απαγορευμένες λέξεις."))))
+                val options = suggestion.get("options", List::class.java) as? List<*> ?: emptyList<Any>()
+                
+                if (questionText.length < 10 || questionText.length > 200) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση πρέπει να είναι 10-200 χαρακτήρες."))))
+                    return
+                }
+
+                if (containsProfanity(questionText) || options.any { containsProfanity(it.toString()) }) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση ή οι απαντήσεις περιέχουν απαγορευμένες λέξεις."))))
                     return
                 }
 
