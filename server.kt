@@ -61,7 +61,8 @@ enum class MessageType {
     CHECK_NEW_QUESTIONS, NEW_QUESTIONS_DATA,
     GET_DISCOVER_PLAYERS, DISCOVER_PLAYERS_DATA,
     USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS,
-    DUEL_CHALLENGE, DUEL_CHALLENGE_RECEIVED, DUEL_ACCEPT, DUEL_SETUP, DUEL_START, DUEL_FINISH, DUEL_RESULT, DUEL_HISTORY_REQUEST, DUEL_HISTORY_DATA
+    DUEL_CHALLENGE, DUEL_CHALLENGE_RECEIVED, DUEL_ACCEPT, DUEL_SETUP, DUEL_START, DUEL_FINISH, DUEL_RESULT, DUEL_HISTORY_REQUEST, DUEL_HISTORY_DATA,
+    REMOVE_FRIEND
 }
 
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
@@ -337,18 +338,37 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.REJECT_REQUEST -> {
             val user = canonicalName(usersColl, msg.sender.trim())
             val requester = msg.content?.trim() ?: return
-
-            // Remove from folders
+            
             requestsColl.updateOne(Filters.eq("_id", user), Updates.pull("incoming", requester))
-            requestsColl.updateOne(Filters.eq("_id", requester), Updates.pull("outgoing", user))
+            // Cleanup empty documents
+            val myReq = requestsColl.find(Filters.eq("_id", user)).firstOrNull()
+            if (myReq != null && (myReq["incoming"] as? List<*>)?.isEmpty() == true && (myReq["outgoing"] as? List<*>)?.isEmpty() == true) {
+                requestsColl.deleteOne(Filters.eq("_id", user))
+            }
+            val targetReq = requestsColl.find(Filters.eq("_id", requester)).firstOrNull()
+            if (targetReq != null && (targetReq["incoming"] as? List<*>)?.isEmpty() == true && (targetReq["outgoing"] as? List<*>)?.isEmpty() == true) {
+                requestsColl.deleteOne(Filters.eq("_id", requester))
+            }
 
             // Sync both
             sendRequestList(user, session)
             onlineUsers[requester]?.let { sendRequestList(requester, it) }
         }
 
+        MessageType.REMOVE_FRIEND -> {
+            val user = canonicalName(usersColl, msg.sender.trim())
+            val friendToRemove = msg.content?.trim() ?: return
+
+            friendsColl.updateOne(Filters.eq("_id", user), Updates.pull("friends", friendToRemove))
+            friendsColl.updateOne(Filters.eq("_id", friendToRemove), Updates.pull("friends", user))
+
+            sendFriendList(user, session)
+            onlineUsers[friendToRemove]?.let { sendFriendList(friendToRemove, it) }
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο παίκτης $friendToRemove αφαιρέθηκε από τους φίλους."))))
+        }
+
         MessageType.INVITE -> {
-            val host = msg.sender
+            val host = canonicalName(usersColl, msg.sender.trim())
             val target = msg.content ?: return
             val room = rooms.values.find { it.hostSession == session }
             if (room != null) {
@@ -363,7 +383,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.CHALLENGE_FRIEND -> {
-            val host = msg.sender
+            val host = canonicalName(usersColl, msg.sender.trim())
             val target = msg.content?.split("|")?.getOrNull(1) ?: return
             val seed = (1..99999).random().toString()
             val challengeStr = "SOLO|$host|$seed"
@@ -642,7 +662,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         // ==================== DISCOVER PLAYERS ====================
         MessageType.GET_DISCOVER_PLAYERS -> {
-            val user = msg.sender
+            val user = canonicalName(usersColl, msg.sender.trim())
             // 1. Get ALL users except the current one
             val allUsers = usersColl.find(Filters.ne("name", user)).limit(50).toList()
             
@@ -650,9 +670,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val myFriendsDoc = friendsColl.find(Filters.eq("_id", user)).firstOrNull()
             val myFriends = (myFriendsDoc?.get("friends") as? List<*>)?.map { it.toString() }?.toSet() ?: emptySet()
 
-            // 3. Filter out those who are already friends
+            // 3. Get pending requests to filter them out too
+            val myRequestsDoc = requestsColl.find(Filters.eq("_id", user)).firstOrNull()
+            val incoming = (myRequestsDoc?.get("incoming") as? List<*>)?.map { it.toString() } ?: emptyList()
+            val outgoing = (myRequestsDoc?.get("outgoing") as? List<*>)?.map { it.toString() } ?: emptyList()
+            val pending = (incoming + outgoing).toSet()
+
+            // 4. Filter out those who are already friends or have pending requests
             val discoverable = allUsers.mapNotNull { it.getString("name") }
-                .filter { !myFriends.contains(it) }
+                .filter { !myFriends.contains(it) && !pending.contains(it) }
                 .take(30)
 
             println("SERVER: Discover Players for $user -> Found ${discoverable.size} candidates")
@@ -660,7 +686,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.DUEL_CHALLENGE -> {
-            val host = msg.sender
+            val host = canonicalName(usersColl, msg.sender.trim())
             val content = msg.content ?: return
             val parts = content.split("|")
             val target = parts.getOrNull(0) ?: return
