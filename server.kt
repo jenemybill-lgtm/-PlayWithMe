@@ -61,8 +61,9 @@ enum class MessageType {
     SYNC_OFFLINE_SCORES, SYNC_OFFLINE_SCORES_RESPONSE,
     CHECK_NEW_QUESTIONS, NEW_QUESTIONS_DATA,
     GET_DISCOVER_PLAYERS, DISCOVER_PLAYERS_DATA,
+    USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS,
     DUEL_CHALLENGE, DUEL_CHALLENGE_RECEIVED, DUEL_ACCEPT, DUEL_SETUP, DUEL_START, DUEL_FINISH, DUEL_RESULT, DUEL_HISTORY_REQUEST, DUEL_HISTORY_DATA,
-    REMOVE_FRIEND
+    REMOVE_FRIEND, ROOM_PLAYERS_UPDATE
 }
 
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
@@ -746,8 +747,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (ADMIN_USERS.contains(msg.sender)) {
                 try {
                     val rawContent = msg.content ?: return
+                    // Try to find hex ID first
                     val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
-                    val cleanId = idMatch?.value ?: return
+                    val cleanId = idMatch?.value ?: rawContent.trim().replace("\"", "")
+                    
+                    if (cleanId.length != 24) {
+                        println("SERVER ERROR: Invalid ID length (${cleanId.length}): $cleanId")
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης."))))
+                        return
+                    }
                     
                     val id = org.bson.types.ObjectId(cleanId)
                     val suggestionsColl = database.getCollection<Document>("suggested_questions")
@@ -795,8 +803,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (ADMIN_USERS.contains(msg.sender)) {
                 try {
                     val rawContent = msg.content ?: return
+                    // Try to find hex ID first
                     val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
-                    val cleanId = idMatch?.value ?: return
+                    val cleanId = idMatch?.value ?: rawContent.trim().replace("\"", "")
+                    
+                    if (cleanId.length != 24) {
+                        println("SERVER ERROR: Invalid ID length (${cleanId.length}): $cleanId")
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης."))))
+                        return
+                    }
                     
                     val id = org.bson.types.ObjectId(cleanId)
                     
