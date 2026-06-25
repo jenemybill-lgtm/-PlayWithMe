@@ -220,7 +220,12 @@ fun main() {
 fun translateText(text: String, targetLang: String): String {
     if (targetLang == "el") return text
     // Placeholder for real translation API (e.g. Google Translate)
-    return "($targetLang) $text" 
+    // In a real scenario, you'd use a Translation Client here.
+    return when(targetLang) {
+        "en" -> "[EN] $text"
+        "de" -> "[DE] $text"
+        else -> "($targetLang) $text"
+    }
 }
 
 fun translateQuestion(doc: Document, targetLang: String): Document {
@@ -496,8 +501,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     database.getCollection<Document>("challenges").insertOne(chalDoc)
                     
                     val challengeStr = "RANDOM|$host|$cats|$challengeId"
-                    onlineUsers[target]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η πρόκληση στάλθηκε!"))))
+                    val targetSession = onlineUsers[target]
+                    if (targetSession != null) {
+                        targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
+                    } else {
+                        pendingColl.insertOne(Document("target", target).append("type", "CHALLENGE_RECEIVED").append("content", challengeStr))
+                    }
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η πρόκληση στάλθηκε στον $target!"))))
                 } else {
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν βρέθηκε διαθέσιμος αντίπαλος. Δοκίμασε ξανά!"))))
                 }
