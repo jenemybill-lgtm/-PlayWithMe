@@ -22,8 +22,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "2.2"
-const val LATEST_VERSION_CODE = 13
+const val LATEST_VERSION_NAME = "3.1"
+const val LATEST_VERSION_CODE = 16
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
@@ -81,6 +81,7 @@ data class FriendInfo(val name: String, var isOnline: Boolean)
 data class RequestLists(val incoming: List<String>, val outgoing: List<String>)
 
 val onlineUsers = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
+val userLanguages = ConcurrentHashMap<String, String>() // Track preferred language for each user
 val rooms = ConcurrentHashMap<String, GameRoom>()
 val gson = Gson()
 lateinit var database: MongoDatabase
@@ -106,7 +107,10 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
 
     suspend fun updateHostPlayerCount() {
         try {
-            hostSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.PLAYER_COUNT, "Server", players.size.toString()))))
+            val names = players.map { it.name }.joinToString(", ")
+            val count = players.size.toString()
+            hostSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.PLAYER_COUNT, "Server", count))))
+            broadcast(GameMessage(MessageType.ROOM_PLAYERS_UPDATE, "Server", names))
         } catch (e: Exception) {}
     }
 }
@@ -202,7 +206,7 @@ fun main() {
                             runBlocking { room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποσυνδέθηκε.")) }
                         }
                         room.players.removeIf { it.session == this }
-                        runBlocking { room.updateHostPlayerCount() }
+                        if (!isHost) runBlocking { room.updateHostPlayerCount() }
                     }
                     isHost
                 }
@@ -211,7 +215,25 @@ fun main() {
     }.start(wait = true)
 }
 
-// ==================== HELPERS ====================
+// ==================== TRANSLATION (MOCK/API) ====================
+fun translateText(text: String, targetLang: String): String {
+    if (targetLang == "el") return text
+    // Placeholder for real translation API (e.g. Google Translate)
+    return "($targetLang) $text" 
+}
+
+fun translateQuestion(doc: Document, targetLang: String): Document {
+    if (targetLang == "el") return doc
+    
+    val translated = Document(doc)
+    val originalText = doc.getString("text") ?: ""
+    val originalOptions = doc.getList("options", String::class.java) ?: emptyList()
+    
+    translated.append("text", translateText(originalText, targetLang))
+    translated.append("options", originalOptions.map { translateText(it, targetLang) })
+    
+    return translated
+}
 suspend fun canonicalName(usersColl: MongoCollection<Document>, raw: String): String {
     val doc = usersColl.find(Filters.regex("name", "^${Pattern.quote(raw)}$", "i")).toList().firstOrNull()
     return doc?.getString("name") ?: raw
@@ -263,9 +285,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.LOGIN -> {
-            val name = msg.content?.trim() ?: return
+            val name = msg.sender.trim() // sender is username
             val official = canonicalName(usersColl, name)
             onlineUsers[official] = session
+            
+            // Save preferred language
+            val lang = msg.content ?: "el"
+            userLanguages[official] = lang
 
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
             
@@ -427,14 +453,64 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.CHALLENGE_FRIEND -> {
             val host = canonicalName(usersColl, msg.sender.trim())
-            val target = msg.content?.split("|")?.getOrNull(1) ?: return
-            val seed = (1..99999).random().toString()
-            val challengeStr = "SOLO|$host|$seed"
-            val targetSession = onlineUsers[target]
-            if (targetSession != null) {
-                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
+            val rawContent = msg.content ?: return
+            
+            if (rawContent.startsWith("RANDOM|")) {
+                // RANDOM CHALLENGE LOGIC WITH LIMITS
+                val dailyLimitsColl = database.getCollection<Document>("daily_limits")
+                val now = System.currentTimeMillis()
+                val dayMillis = 24 * 60 * 60 * 1000L
+                
+                val limitDoc = dailyLimitsColl.find(Filters.eq("_id", host)).firstOrNull()
+                val lastReset = limitDoc?.getLong("lastReset") ?: 0L
+                var count = limitDoc?.getInteger("count") ?: 0
+                
+                if (now - lastReset > dayMillis) {
+                    count = 0
+                    dailyLimitsColl.updateOne(Filters.eq("_id", host), Updates.combine(Updates.set("count", 0), Updates.set("lastReset", now)), UpdateOptions().upsert(true))
+                }
+                
+                if (count >= 3) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "challenge_limit_reached"))))
+                    return
+                }
+                
+                // Increment count
+                dailyLimitsColl.updateOne(Filters.eq("_id", host), Updates.inc("count", 1), UpdateOptions().upsert(true))
+                
+                // Find random opponent
+                val allUsers = usersColl.find(Filters.ne("name", host)).toList()
+                val target = allUsers.shuffled().firstOrNull()?.getString("name")
+                
+                if (target != null) {
+                    val cats = rawContent.substringAfter("RANDOM|")
+                    val challengeId = "CHAL_${System.currentTimeMillis()}"
+                    val chalDoc = Document("_id", challengeId)
+                        .append("sender", host)
+                        .append("receiver", target)
+                        .append("categories", cats)
+                        .append("timestamp", now)
+                        .append("status", "PENDING")
+                    
+                    database.getCollection<Document>("challenges").insertOne(chalDoc)
+                    
+                    val challengeStr = "RANDOM|$host|$cats|$challengeId"
+                    onlineUsers[target]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η πρόκληση στάλθηκε!"))))
+                } else {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν βρέθηκε διαθέσιμος αντίπαλος. Δοκίμασε ξανά!"))))
+                }
             } else {
-                pendingColl.insertOne(Document("target", target).append("type", "CHALLENGE_RECEIVED").append("content", challengeStr))
+                // Standard direct challenge
+                val target = msg.content?.split("|")?.getOrNull(1) ?: return
+                val seed = (1..99999).random().toString()
+                val challengeStr = "SOLO|$host|$seed"
+                val targetSession = onlineUsers[target]
+                if (targetSession != null) {
+                    targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
+                } else {
+                    pendingColl.insertOne(Document("target", target).append("type", "CHALLENGE_RECEIVED").append("content", challengeStr))
+                }
             }
         }
 
@@ -444,6 +520,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             room.players.add(Player(msg.sender, session))
             rooms[code] = room
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.JOIN_RESPONSE, "Server", code))))
+            room.updateHostPlayerCount()
         }
 
         MessageType.JOIN -> {
@@ -614,7 +691,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 allSoloQuestions.addAll(fallback)
             }
             
-            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(allSoloQuestions)))))
+            // TRANSLATE before sending
+            val lang = userLanguages[msg.sender] ?: "el"
+            val translated = allSoloQuestions.map { translateQuestion(it, lang) }
+            
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(translated)))))
         }
 
         MessageType.CHALLENGE_RESULT -> {
@@ -622,16 +703,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val action = parts.getOrNull(0)
             val score = parts.getOrNull(1)?.toIntOrNull() ?: 0
             
-            val targetColl = when (action) {
-                "BLITZ_SUBMIT" -> database.getCollection<Document>("blitz_leaderboard")
-                else -> database.getCollection<Document>("solo_leaderboard")
+            val collectionName = when (action) {
+                "BLITZ_SUBMIT" -> "blitz_leaderboard"
+                "SOLO_SUBMIT" -> "solo_leaderboard"
+                else -> "solo_leaderboard"
             }
+            
+            val targetColl = database.getCollection<Document>(collectionName)
             
             targetColl.updateOne(
                 Filters.eq("name", msg.sender),
                 Updates.combine(Updates.max("maxScore", score), Updates.set("lastUpdate", Date())),
                 UpdateOptions().upsert(true)
             )
+            println("SERVER: Score submitted for ${msg.sender} ($collectionName): $score")
         }
 
         // ==================== LEADERBOARD ====================
@@ -667,34 +752,36 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     val id = org.bson.types.ObjectId(cleanId)
                     val suggestionsColl = database.getCollection<Document>("suggested_questions")
                     
-                    // 1. Find the full question in suggestions
-                    val question = suggestionsColl.find(Filters.eq("_id", id)).firstOrNull()
+                    // 1. Find the question in suggestions
+                    val questionDoc = suggestionsColl.find(Filters.eq("_id", id)).firstOrNull()
                     
-                    if (question != null) {
-                        val category = question.getString("category") ?: "Άλλα"
+                    if (questionDoc != null) {
+                        val category = questionDoc.getString("category") ?: "Άλλα"
                         val targetColl = getQuestionsCollection(category)
                         
-                        // 2. Prevent duplicates in target: check if text exists
-                        val text = question.getString("text") ?: ""
+                        // 2. Check for duplicate text in target category
+                        val text = questionDoc.getString("text") ?: ""
                         val existing = targetColl.find(Filters.eq("text", text)).firstOrNull()
                         
                         if (existing == null) {
-                            // 3. Insert into the correct categorized collection
-                            targetColl.insertOne(question)
-                            println("SERVER: Question moved to $category collection.")
+                            // 3. Move to proper collection with approved flag
+                            val approvedDoc = Document(questionDoc).apply {
+                                append("isApproved", true)
+                                append("approvedAt", Date())
+                            }
+                            targetColl.insertOne(approvedDoc)
+                            println("SERVER: Question $cleanId APPROVED and moved to $category")
                         } else {
-                            println("SERVER: Question already exists in $category, skipping insertion.")
+                            println("SERVER: Question $cleanId already exists in $category, just deleting from suggestions.")
                         }
 
-                        // 4. Always remove from suggestions after approval/check
+                        // 4. Always delete from suggestions after successful process
                         val result = suggestionsColl.deleteOne(Filters.eq("_id", id))
-                        
                         if (result.deletedCount > 0) {
                             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
-                            println("SERVER: Question $cleanId REMOVED from suggestions.")
                         }
                     } else {
-                        println("SERVER ERROR: Question $cleanId not found in suggested_questions during approval.")
+                        println("SERVER ERROR: Question $cleanId NOT FOUND in suggestions during approval.")
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε στις προτάσεις."))))
                     }
                 } catch (e: Exception) {
@@ -1052,7 +1139,16 @@ suspend fun sendQuestionAndWait(room: GameRoom, question: Document) {
     val correctIdx = question.getInteger("correctAnswerIndex") ?: 0
     room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
     room.waitingForAnswers = true
-    room.broadcast(GameMessage(MessageType.QUESTION, "Server", gson.toJson(question)))
+    
+    // Broadcast with translation per player
+    room.players.forEach { p ->
+        val lang = userLanguages[p.name] ?: "el"
+        val translated = translateQuestion(question, lang)
+        try { p.session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(translated))))) } catch (e: Exception) {}
+    }
+    // Also send to host
+    val hostLang = onlineUsers.entries.find { it.value == room.hostSession }?.key?.let { userLanguages[it] } ?: "el"
+    try { room.hostSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(translateQuestion(question, hostLang)))))) } catch (e: Exception) {}
 
     var elapsed = 0
     while (elapsed < room.timerSeconds * 1000 && room.waitingForAnswers && room.isGameRunning) { delay(200); elapsed += 200 }
