@@ -123,11 +123,44 @@ suspend fun initDatabase() {
         database = client.getDatabase("playwithme")
         println("SERVER: DATABASE CONNECTED SUCCESSFULLY")
         
-        // Perform one-time migration
+        // 1. Perform one-time migration to categories if needed
         migrateQuestionsToCategories()
+        
+        // 2. Perform one-time migration to MULTILINGUAL structure
+        migrateQuestionsToMultilingual()
     } catch (e: Exception) {
         println("DATABASE ERROR: ${e.message}")
     }
+}
+
+suspend fun migrateQuestionsToMultilingual() {
+    ALL_CATEGORIES.forEach { cat ->
+        val coll = getQuestionsCollection(cat)
+        val questions = coll.find().toList()
+        
+        questions.forEach { doc ->
+            val textObj = doc.get("text")
+            if (textObj is String) {
+                // This is an old-style flat question. Convert it.
+                val grText = textObj
+                val grOptions = doc.getList("options", String::class.java) ?: emptyList()
+                
+                val newText = Document("el", grText)
+                    .append("en", "[EN] $grText") // Demonstration: actual translation happens here
+                    .append("de", "[DE] $grText")
+                
+                val newOptions = Document("el", grOptions)
+                    .append("en", grOptions.map { "[EN] $it" })
+                    .append("de", grOptions.map { "[DE] $it" })
+                
+                coll.updateOne(Filters.eq("_id", doc.get("_id")), Updates.combine(
+                    Updates.set("text", newText),
+                    Updates.set("options", newOptions)
+                ))
+            }
+        }
+    }
+    println("SERVER MIGRATION: Multilingual conversion checked for all categories.")
 }
 
 suspend fun migrateQuestionsToCategories() {
@@ -217,15 +250,6 @@ fun main() {
 }
 
 // ==================== TRANSLATION (LINKED MULTILINGUAL) ====================
-fun translateText(text: String, targetLang: String): String {
-    if (targetLang == "el") return text
-    return when(targetLang) {
-        "en" -> "[EN] $text"
-        "de" -> "[DE] $text"
-        else -> "($targetLang) $text"
-    }
-}
-
 fun translateQuestion(doc: Document, targetLang: String): Document {
     val translated = Document(doc)
     
@@ -233,11 +257,10 @@ fun translateQuestion(doc: Document, targetLang: String): Document {
     val textObj = doc.get("text")
     if (textObj is Document || textObj is Map<*, *>) {
         val textMap = if (textObj is Document) textObj else Document(textObj as Map<String, Any>)
-        // Try requested lang, fallback to Greek, then empty
         translated.append("text", textMap.getString(targetLang) ?: textMap.getString("el") ?: "")
     } else if (textObj is String) {
-        // Legacy mock translation if only Greek string exists
-        translated.append("text", translateText(textObj, targetLang))
+        // Fallback for simple strings: Use pseudo-translation if not Greek
+        translated.append("text", if (targetLang == "el") textObj else "($targetLang) $textObj")
     }
 
     // 2. Handle Linked Multilingual Options
@@ -247,9 +270,9 @@ fun translateQuestion(doc: Document, targetLang: String): Document {
         val list = optionsMap.getList(targetLang, String::class.java) ?: optionsMap.getList("el", String::class.java) ?: emptyList()
         translated.append("options", list)
     } else if (optionsObj is List<*>) {
-        // Legacy mock translation for flat list
+        // Fallback: pseudo-translate list items
         val originalList = optionsObj as List<String>
-        translated.append("options", originalList.map { translateText(it, targetLang) })
+        translated.append("options", if (targetLang == "el") originalList else originalList.map { "($targetLang) $it" })
     }
     
     return translated
@@ -584,7 +607,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 }
 
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
-                room.gameJob = CoroutineScope(Dispatchers.Default).launch { delay(2000); runGameLoop(room) }
+                // 5-second delay to ensure all participants have opened GameActivity
+                room.gameJob = CoroutineScope(Dispatchers.Default).launch { delay(5000); runGameLoop(room) }
             }
         }
 
@@ -785,14 +809,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         // ==================== LEADERBOARD ====================
         MessageType.GET_LEADERBOARD -> {
             val mode = msg.content ?: "SOLO"
-            val targetColl = if (mode == "BLITZ") {
-                database.getCollection<Document>("blitz_leaderboard")
-            } else {
-                database.getCollection<Document>("solo_leaderboard")
+            val targetColl = when(mode) {
+                "BLITZ" -> database.getCollection<Document>("blitz_leaderboard")
+                "DUEL" -> database.getCollection<Document>("duel_stats")
+                else -> database.getCollection<Document>("solo_leaderboard")
             }
             
-            val top = targetColl.find().sort(Document("maxScore", -1)).limit(50).toList()
-                .map { mapOf("name" to it.getString("name"), "score" to it.getInteger("maxScore")) }
+            val sortField = if (mode == "DUEL") "wins" else "maxScore"
+            
+            val top = targetColl.find().sort(Document(sortField, -1)).limit(50).toList()
+                .map { 
+                    if (mode == "DUEL") {
+                        mapOf("name" to (it.getString("_id") ?: "Anon"), "score" to (it.getInteger("wins") ?: 0))
+                    } else {
+                        mapOf("name" to (it.getString("name") ?: "Anon"), "score" to (it.getInteger("maxScore") ?: 0)) 
+                    }
+                }
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LEADERBOARD_DATA, "Server", gson.toJson(top)))))
         }
 
@@ -1219,15 +1251,16 @@ suspend fun sendQuestionAndWait(room: GameRoom, question: Document) {
     room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
     room.waitingForAnswers = true
     
-    // Broadcast with translation per player
-    room.players.forEach { p ->
-        val lang = userLanguages[p.name] ?: "el"
+    // Broadcast individualized translation to everyone in the room
+    val recipients = room.players.map { it.session }.toMutableSet()
+    recipients.add(room.hostSession)
+    
+    recipients.forEach { sess ->
+        val name = onlineUsers.entries.find { it.value == sess }?.key
+        val lang = name?.let { userLanguages[it] } ?: "el"
         val translated = translateQuestion(question, lang)
-        try { p.session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(translated))))) } catch (e: Exception) {}
+        try { sess.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(translated))))) } catch (e: Exception) {}
     }
-    // Also send to host
-    val hostLang = onlineUsers.entries.find { it.value == room.hostSession }?.key?.let { userLanguages[it] } ?: "el"
-    try { room.hostSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(translateQuestion(question, hostLang)))))) } catch (e: Exception) {}
 
     var elapsed = 0
     while (elapsed < room.timerSeconds * 1000 && room.waitingForAnswers && room.isGameRunning) { delay(200); elapsed += 200 }
