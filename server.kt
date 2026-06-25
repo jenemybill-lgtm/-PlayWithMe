@@ -216,11 +216,9 @@ fun main() {
     }.start(wait = true)
 }
 
-// ==================== TRANSLATION (MOCK/API) ====================
+// ==================== TRANSLATION (LINKED MULTILINGUAL) ====================
 fun translateText(text: String, targetLang: String): String {
     if (targetLang == "el") return text
-    // Placeholder for real translation API (e.g. Google Translate)
-    // In a real scenario, you'd use a Translation Client here.
     return when(targetLang) {
         "en" -> "[EN] $text"
         "de" -> "[DE] $text"
@@ -229,14 +227,30 @@ fun translateText(text: String, targetLang: String): String {
 }
 
 fun translateQuestion(doc: Document, targetLang: String): Document {
-    if (targetLang == "el") return doc
-    
     val translated = Document(doc)
-    val originalText = doc.getString("text") ?: ""
-    val originalOptions = doc.getList("options", String::class.java) ?: emptyList()
     
-    translated.append("text", translateText(originalText, targetLang))
-    translated.append("options", originalOptions.map { translateText(it, targetLang) })
+    // 1. Handle Linked Multilingual Text
+    val textObj = doc.get("text")
+    if (textObj is Document || textObj is Map<*, *>) {
+        val textMap = if (textObj is Document) textObj else Document(textObj as Map<String, Any>)
+        // Try requested lang, fallback to Greek, then empty
+        translated.append("text", textMap.getString(targetLang) ?: textMap.getString("el") ?: "")
+    } else if (textObj is String) {
+        // Legacy mock translation if only Greek string exists
+        translated.append("text", translateText(textObj, targetLang))
+    }
+
+    // 2. Handle Linked Multilingual Options
+    val optionsObj = doc.get("options")
+    if (optionsObj is Document || optionsObj is Map<*, *>) {
+        val optionsMap = if (optionsObj is Document) optionsObj else Document(optionsObj as Map<String, Any>)
+        val list = optionsMap.getList(targetLang, String::class.java) ?: optionsMap.getList("el", String::class.java) ?: emptyList()
+        translated.append("options", list)
+    } else if (optionsObj is List<*>) {
+        // Legacy mock translation for flat list
+        val originalList = optionsObj as List<String>
+        translated.append("options", originalList.map { translateText(it, targetLang) })
+    }
     
     return translated
 }
@@ -724,10 +738,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     Updates.set("status", "RECEIVER_WAITING")
                 ))
                 
-                // Notify Receiver
+                // Notify Receiver with translation
                 val target = chal.getString("receiver") ?: return
                 val cats = chal.getString("categories") ?: ""
-                val qJson = gson.toJson(chal.get("questions", List::class.java))
+                val rawQuestions = chal.get("questions", List::class.java) as? List<Document> ?: emptyList()
+                val targetLang = userLanguages[target] ?: "el"
+                val qJson = gson.toJson(rawQuestions.map { translateQuestion(it, targetLang) })
+
                 val challengeStr = "RANDOM|$sender|$cats|$chalId|$qJson"
                 val targetSession = onlineUsers[target]
                 if (targetSession != null) {
@@ -962,10 +979,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 
                 // Fetch questions for the combined categories
                 val questions = fetchQuestions(questionsColl, 10, if (combinedCats.isEmpty()) listOf("Όλες") else combinedCats, listOf("Όλα"))
-                val qJson = gson.toJson(questions)
                 
-                onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson))))
-                onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson))))
+                val lang1 = userLanguages[p1] ?: "el"
+                val qJson1 = gson.toJson(questions.map { translateQuestion(it, lang1) })
+                onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson1))))
+
+                val lang2 = userLanguages[p2] ?: "el"
+                val qJson2 = gson.toJson(questions.map { translateQuestion(it, lang2) })
+                onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson2))))
             }
         }
         
