@@ -27,7 +27,7 @@ const val LATEST_VERSION_CODE = 17
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
-val ADMIN_USERS = setOf("jenemybill", "admin", "basil")
+val ADMIN_USERS = setOf("jenemybill")
 val lastSubmissionTime = ConcurrentHashMap<String, Long>()
 
 fun containsProfanity(text: String): Boolean {
@@ -792,13 +792,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (ADMIN_USERS.contains(msg.sender)) {
                 try {
                     val rawContent = msg.content ?: return
-                    // Try to find hex ID first
+                    // Robust ID extraction: Look for a 24-character hex string anywhere in the content
                     val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
-                    val cleanId = idMatch?.value ?: rawContent.trim().replace("\"", "")
+                    val cleanId = idMatch?.value
                     
-                    if (cleanId.length != 24) {
-                        println("SERVER ERROR: Invalid ID length (${cleanId.length}): $cleanId")
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης."))))
+                    if (cleanId == null || cleanId.length != 24) {
+                        println("SERVER ERROR: Failed to extract valid 24-char hex ID from: $rawContent")
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης (Format Error)."))))
                         return
                     }
                     
@@ -834,8 +834,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
                         }
                     } else {
-                        println("SERVER ERROR: Question $cleanId NOT FOUND in suggestions during approval.")
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε στις προτάσεις."))))
+                        println("SERVER ERROR: Question $cleanId NOT FOUND in suggested_questions.")
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε στη βάση."))))
                     }
                 } catch (e: Exception) {
                     println("APPROVE ERROR: ${e.message}")
@@ -848,28 +848,26 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (ADMIN_USERS.contains(msg.sender)) {
                 try {
                     val rawContent = msg.content ?: return
-                    // Try to find hex ID first
                     val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
-                    val cleanId = idMatch?.value ?: rawContent.trim().replace("\"", "")
+                    val cleanId = idMatch?.value
                     
-                    if (cleanId.length != 24) {
-                        println("SERVER ERROR: Invalid ID length (${cleanId.length}): $cleanId")
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης."))))
+                    if (cleanId == null || cleanId.length != 24) {
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης (Format Error)."))))
                         return
                     }
-                    
+
                     val id = org.bson.types.ObjectId(cleanId)
-                    
                     val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
+                    
                     if (result.deletedCount > 0) {
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "REJECTED"))))
-                        println("SERVER: Question $cleanId REJECTED and removed from suggested_questions.")
+                        println("SERVER: Question $cleanId REJECTED and removed.")
                     } else {
-                        println("SERVER ERROR: Question $cleanId not found in suggested_questions during rejection.")
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε (ID: $cleanId)."))))
+                        println("SERVER ERROR: Question $cleanId not found for rejection.")
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε."))))
                     }
                 } catch (e: Exception) {
-                    println("REJECT ERROR: ${e.message} | Content: ${msg.content}")
+                    println("REJECT ERROR: ${e.message}")
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα απόρριψης: ${e.message}"))))
                 }
             }
