@@ -22,8 +22,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "2.1"
-const val LATEST_VERSION_CODE = 12
+const val LATEST_VERSION_NAME = "2.2"
+const val LATEST_VERSION_CODE = 13
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
@@ -465,10 +465,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 
                 // HOST-DRIVEN QUESTIONS: Server receives questions from Host and relays them
                 val hostQuestions = setup["questions"] as? List<Map<String, Any>>
-                if (hostQuestions != null) {
+                val isHostDriven = setup["isHostDriven"] as? Boolean ?: false
+                
+                if (hostQuestions != null && isHostDriven) {
+                    println("SERVER: Starting HOST-DRIVEN game with ${hostQuestions.size} questions from ${msg.sender}")
                     room.questions = hostQuestions.map { Document(it) }
                 } else {
-                    // Fallback to DB if something went wrong, though we want to avoid this
+                    // Fallback only if NOT host driven, but for group we want to avoid this
+                    val count = (setup["count"] as? Double)?.toInt() ?: 10
                     val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
                     val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
                     room.questions = fetchQuestions(questionsColl, count, categories, difficulties)
@@ -523,12 +527,17 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 
                 groupedByCat.forEach { (category, questions) ->
                     val coll = getQuestionsCollection(category)
-                    val existingTexts = coll.find().projection(Document("text", 1)).toList().map { it.getString("text") }.toSet()
+                    
+                    // Case-insensitive text check for robustness
+                    val existingTexts = coll.find().projection(Document("text", 1)).toList()
+                        .mapNotNull { it.getString("text")?.lowercase(Locale.ROOT)?.trim() }.toSet()
                     
                     val toInsert = mutableListOf<Document>()
                     questions.forEach { q ->
                         val text = q["text"] as? String ?: return@forEach
-                        if (!existingTexts.contains(text)) {
+                        val normalized = text.lowercase(Locale.ROOT).trim()
+                        
+                        if (!existingTexts.contains(normalized)) {
                             toInsert.add(Document(q).apply { append("isApproved", true) })
                             added++
                         }
@@ -608,9 +617,33 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(allSoloQuestions)))))
         }
 
+        MessageType.CHALLENGE_RESULT -> {
+            val parts = msg.content?.split("|") ?: return
+            val action = parts.getOrNull(0)
+            val score = parts.getOrNull(1)?.toIntOrNull() ?: 0
+            
+            val targetColl = when (action) {
+                "BLITZ_SUBMIT" -> database.getCollection<Document>("blitz_leaderboard")
+                else -> database.getCollection<Document>("solo_leaderboard")
+            }
+            
+            targetColl.updateOne(
+                Filters.eq("name", msg.sender),
+                Updates.combine(Updates.max("maxScore", score), Updates.set("lastUpdate", Date())),
+                UpdateOptions().upsert(true)
+            )
+        }
+
         // ==================== LEADERBOARD ====================
         MessageType.GET_LEADERBOARD -> {
-            val top = leaderboardColl.find().sort(Document("maxScore", -1)).limit(50).toList()
+            val mode = msg.content ?: "SOLO"
+            val targetColl = if (mode == "BLITZ") {
+                database.getCollection<Document>("blitz_leaderboard")
+            } else {
+                database.getCollection<Document>("solo_leaderboard")
+            }
+            
+            val top = targetColl.find().sort(Document("maxScore", -1)).limit(50).toList()
                 .map { mapOf("name" to it.getString("name"), "score" to it.getInteger("maxScore")) }
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LEADERBOARD_DATA, "Server", gson.toJson(top)))))
         }
@@ -632,16 +665,36 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     val cleanId = idMatch?.value ?: return
                     
                     val id = org.bson.types.ObjectId(cleanId)
+                    val suggestionsColl = database.getCollection<Document>("suggested_questions")
                     
-                    // NEW LOGIC: Just delete from suggestions. 
-                    // The Admin app already saved the question locally and will sync it back to the proper category collection later.
-                    val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
+                    // 1. Find the full question in suggestions
+                    val question = suggestionsColl.find(Filters.eq("_id", id)).firstOrNull()
                     
-                    if (result.deletedCount > 0) {
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
-                        println("SERVER: Question $cleanId APPROVED and REMOVED from suggestions.")
+                    if (question != null) {
+                        val category = question.getString("category") ?: "Άλλα"
+                        val targetColl = getQuestionsCollection(category)
+                        
+                        // 2. Prevent duplicates in target: check if text exists
+                        val text = question.getString("text") ?: ""
+                        val existing = targetColl.find(Filters.eq("text", text)).firstOrNull()
+                        
+                        if (existing == null) {
+                            // 3. Insert into the correct categorized collection
+                            targetColl.insertOne(question)
+                            println("SERVER: Question moved to $category collection.")
+                        } else {
+                            println("SERVER: Question already exists in $category, skipping insertion.")
+                        }
+
+                        // 4. Always remove from suggestions after approval/check
+                        val result = suggestionsColl.deleteOne(Filters.eq("_id", id))
+                        
+                        if (result.deletedCount > 0) {
+                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
+                            println("SERVER: Question $cleanId REMOVED from suggestions.")
+                        }
                     } else {
-                        // Fallback: try searching in all collections just in case it's misrouted
+                        println("SERVER ERROR: Question $cleanId not found in suggested_questions during approval.")
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε στις προτάσεις."))))
                     }
                 } catch (e: Exception) {
@@ -663,8 +716,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
                     if (result.deletedCount > 0) {
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "REJECTED"))))
-                        println("SERVER: Question $cleanId REJECTED and removed from suggestions.")
+                        println("SERVER: Question $cleanId REJECTED and removed from suggested_questions.")
                     } else {
+                        println("SERVER ERROR: Question $cleanId not found in suggested_questions during rejection.")
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε (ID: $cleanId)."))))
                     }
                 } catch (e: Exception) {
@@ -746,9 +800,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val duel = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
             
             if (player == duel.getString("player1")) {
-                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("p1_ready", true))
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_ready", true), Updates.set("p1_cats", parts.getOrNull(1) ?: "")))
             } else {
-                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("p2_ready", true))
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p2_ready", true), Updates.set("p2_cats", parts.getOrNull(1) ?: "")))
             }
             
             val updated = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
@@ -757,8 +811,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val p1 = updated.getString("player1") ?: ""
                 val p2 = updated.getString("player2") ?: ""
                 
-                // Fetch random questions for the duel
-                val questions = fetchQuestions(questionsColl, 10, listOf("Όλες"), listOf("Όλα"))
+                val cats1 = updated.getString("p1_cats")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+                val cats2 = updated.getString("p2_cats")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+                val combinedCats = (cats1 + cats2).distinct()
+                
+                // Fetch questions for the combined categories
+                val questions = fetchQuestions(questionsColl, 10, if (combinedCats.isEmpty()) listOf("Όλες") else combinedCats, listOf("Όλα"))
                 val qJson = gson.toJson(questions)
                 
                 onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson))))
@@ -809,6 +867,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 
                 // Update Stats
                 updateDuelStats(duelStatsColl, p1, p2, winner)
+
+                // SYNC TO SOLO LEADERBOARD as well
+                val soloColl = database.getCollection<Document>("solo_leaderboard")
+                soloColl.updateOne(Filters.eq("name", p1), Updates.combine(Updates.max("maxScore", s1), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
+                soloColl.updateOne(Filters.eq("name", p2), Updates.combine(Updates.max("maxScore", s2), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
                 
                 val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
                 onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
