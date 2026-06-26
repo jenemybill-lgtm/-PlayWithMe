@@ -514,7 +514,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 println("SERVER: Fetching $count questions from MongoDB for room ${room.code} (Fair Mode)")
                 room.questions = fetchQuestions(questionsColl, count, categories, difficulties)
                 
-                room.extraQuestions = fetchQuestions(questionsColl, 10, listOf("Όλες"), listOf("Όλα"))
                 room.timerSeconds = (setup["timer"] as? Double)?.toInt() ?: 20
                 room.isSuddenDeathEnabled = setup["isSuddenDeath"] as? Boolean ?: true
                 room.isSpeedMode = setup["isSpeedMode"] as? Boolean ?: false
