@@ -134,6 +134,9 @@ suspend fun initDatabase() {
 }
 
 suspend fun migrateQuestionsToMultilingual() {
+    println("SERVER MIGRATION: Starting multilingual conversion...")
+    var totalMigrated = 0
+    
     ALL_CATEGORIES.forEach { cat ->
         val coll = getQuestionsCollection(cat)
         val questions = coll.find().toList()
@@ -146,7 +149,7 @@ suspend fun migrateQuestionsToMultilingual() {
                 val grOptions = doc.getList("options", String::class.java) ?: emptyList()
                 
                 val newText = Document("el", grText)
-                    .append("en", "[EN] $grText") // Demonstration: actual translation happens here
+                    .append("en", "[EN] $grText") 
                     .append("de", "[DE] $grText")
                 
                 val newOptions = Document("el", grOptions)
@@ -157,10 +160,11 @@ suspend fun migrateQuestionsToMultilingual() {
                     Updates.set("text", newText),
                     Updates.set("options", newOptions)
                 ))
+                totalMigrated++
             }
         }
     }
-    println("SERVER MIGRATION: Multilingual conversion checked for all categories.")
+    println("SERVER MIGRATION: Multilingual conversion completed. Migrated $totalMigrated questions.")
 }
 
 suspend fun migrateQuestionsToCategories() {
@@ -257,10 +261,11 @@ fun translateQuestion(doc: Document, targetLang: String): Document {
     val textObj = doc.get("text")
     if (textObj is Document || textObj is Map<*, *>) {
         val textMap = if (textObj is Document) textObj else Document(textObj as Map<String, Any>)
-        translated.append("text", textMap.getString(targetLang) ?: textMap.getString("el") ?: "")
+        val localizedText = textMap.getString(targetLang) ?: textMap.getString("el") ?: ""
+        translated.append("text", localizedText)
     } else if (textObj is String) {
         // Fallback for simple strings: Use pseudo-translation if not Greek
-        translated.append("text", if (targetLang == "el") textObj else "($targetLang) $textObj")
+        translated.append("text", if (targetLang == "el") textObj else "[$targetLang] $textObj")
     }
 
     // 2. Handle Linked Multilingual Options
@@ -272,7 +277,7 @@ fun translateQuestion(doc: Document, targetLang: String): Document {
     } else if (optionsObj is List<*>) {
         // Fallback: pseudo-translate list items
         val originalList = optionsObj as List<String>
-        translated.append("options", if (targetLang == "el") originalList else originalList.map { "($targetLang) $it" })
+        translated.append("options", if (targetLang == "el") originalList else originalList.map { "[$targetLang] $it" })
     }
     
     return translated
@@ -615,12 +620,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.ANSWER -> {
             val room = rooms.values.find { r -> r.players.any { it.session == session } }
             val player = room?.players?.find { it.session == session }
-            if (room != null && room.waitingForAnswers && player != null && !player.hasAnswered && !player.isEliminated) {
-                val parts = msg.content?.split("|") ?: return
-                player.hasAnswered = true
-                player.lastAnswerIndex = parts.getOrNull(0)?.toIntOrNull() ?: -1
-                player.totalTime += parts.getOrNull(1)?.toLongOrNull() ?: 0
-                if (room.players.filter { !it.isEliminated }.all { it.hasAnswered }) room.waitingForAnswers = false
+            if (room != null && player != null) {
+                if (msg.content == "CLIENT_READY") {
+                    player.hasAnswered = true 
+                    println("SERVER: Structural Handshake -> Player ${player.name} is READY.")
+                    return
+                }
+
+                if (room.waitingForAnswers && !player.hasAnswered && !player.isEliminated) {
+                    val parts = msg.content?.split("|") ?: return
+                    player.hasAnswered = true
+                    player.lastAnswerIndex = parts.getOrNull(0)?.toIntOrNull() ?: -1
+                    player.totalTime += parts.getOrNull(1)?.toLongOrNull() ?: 0
+                    if (room.players.filter { !it.isEliminated }.all { it.hasAnswered }) room.waitingForAnswers = false
+                }
             }
         }
 
@@ -648,7 +661,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     
                     // Case-insensitive text check for robustness
                     val existingTexts = coll.find().projection(Document("text", 1)).toList()
-                        .mapNotNull { it.getString("text")?.lowercase(Locale.ROOT)?.trim() }.toSet()
+                        .mapNotNull { 
+                            val textObj = it.get("text")
+                            if (textObj is Document) textObj.getString("el")?.lowercase(Locale.ROOT)?.trim()
+                            else textObj?.toString()?.lowercase(Locale.ROOT)?.trim()
+                        }.toSet()
                     
                     val toInsert = mutableListOf<Document>()
                     questions.forEach { q ->
@@ -656,7 +673,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         val normalized = text.lowercase(Locale.ROOT).trim()
                         
                         if (!existingTexts.contains(normalized)) {
-                            toInsert.add(Document(q).apply { append("isApproved", true) })
+                            // AUTO-CONVERT TO MULTILINGUAL ON UPLOAD
+                            val grOptions = q["options"] as? List<String> ?: emptyList()
+                            val multilingualDoc = Document(q).apply {
+                                append("text", Document("el", text).append("en", "[EN] $text").append("de", "[DE] $text"))
+                                append("options", Document("el", grOptions).append("en", grOptions.map { "[EN] $it" }).append("de", grOptions.map { "[DE] $it" }))
+                                append("isApproved", true)
+                            }
+                            toInsert.add(multilingualDoc)
                             added++
                         }
                     }
@@ -666,11 +690,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     }
                 }
                 
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Συγχρονίστηκαν $added νέες ερωτήσεις σε κατηγορίες!"))))
-                println("SERVER: Bulk Upload from ${msg.sender} -> Added: $added")
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Συγχρονίστηκαν $added νέες ερωτήσεις (Linked Multilingual)!"))))
+                println("SERVER: Bulk Upload (Multilingual) from ${msg.sender} -> Added: $added")
             } catch (e: Exception) {
                 println("SERVER ERROR (bulk upload): ${e.message}")
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αποτυχία συγχρονισμού ερωτήσεων: ${e.message}"))))
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αποτυχία συγχρονισμού: ${e.message}"))))
             }
         }
 
@@ -809,6 +833,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         // ==================== LEADERBOARD ====================
         MessageType.GET_LEADERBOARD -> {
             val mode = msg.content ?: "SOLO"
+            println("SERVER: Leaderboard request for mode: $mode")
+            
             val targetColl = when(mode) {
                 "BLITZ" -> database.getCollection<Document>("blitz_leaderboard")
                 "DUEL" -> database.getCollection<Document>("duel_stats")
@@ -820,6 +846,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val top = targetColl.find().sort(Document(sortField, -1)).limit(50).toList()
                 .map { 
                     if (mode == "DUEL") {
+                        // DuelStats uses _id as name
                         mapOf("name" to (it.getString("_id") ?: "Anon"), "score" to (it.getInteger("wins") ?: 0))
                     } else {
                         mapOf("name" to (it.getString("name") ?: "Anon"), "score" to (it.getInteger("maxScore") ?: 0)) 
@@ -1251,7 +1278,7 @@ suspend fun sendQuestionAndWait(room: GameRoom, question: Document) {
     room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
     room.waitingForAnswers = true
     
-    // Broadcast individualized translation to everyone in the room
+    // Structural Broadcast: Individualized translation per participant
     val recipients = room.players.map { it.session }.toMutableSet()
     recipients.add(room.hostSession)
     
