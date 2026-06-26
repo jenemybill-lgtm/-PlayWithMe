@@ -182,11 +182,10 @@ fun translateQuestion(doc: Document, targetLang: String): Document {
     val finalQuestionText = when {
         textObj is Document || textObj is Map<*, *> -> {
             val textMap = if (textObj is Document) textObj else Document(textObj as Map<String, Any>)
+            // Check if actual translation exists, otherwise use Greek
             textMap.getString(targetLang) ?: textMap.getString("el") ?: "Κενή ερώτηση"
         }
-        textObj is String -> {
-            if (targetLang == "el") textObj else "[$targetLang] $textObj"
-        }
+        textObj is String -> textObj
         else -> "Σφάλμα κειμένου"
     }
     translated.append("text", finalQuestionText)
@@ -198,10 +197,7 @@ fun translateQuestion(doc: Document, targetLang: String): Document {
             val optionsMap = if (optionsObj is Document) optionsObj else Document(optionsObj as Map<String, Any>)
             optionsMap.getList(targetLang, String::class.java) ?: optionsMap.getList("el", String::class.java) ?: emptyList()
         }
-        optionsObj is List<*> -> {
-            val originalList = (optionsObj as List<*>).map { it.toString() }
-            if (targetLang == "el") originalList else originalList.map { "[$targetLang] $it" }
-        }
+        optionsObj is List<*> -> (optionsObj as List<*>).map { it.toString() }
         else -> emptyList<String>()
     }
     translated.append("options", finalOptions)
@@ -586,12 +582,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         val normalized = text.lowercase(Locale.ROOT).trim()
                         
                         if (!existingTexts.contains(normalized)) {
-                            // AUTO-TRANSLATE (Prefixing) to all supported languages (EN, DE)
-                            // NO ARABIC (ar) keys allowed
+                            // --- AUTO-CONVERT ON UPLOAD ---
+                            // Since we don't have a translation API key, we store the Greek text for all slots.
+                            // In a real scenario, you'd call Google/DeepL API here.
                             val grOptions = q["options"] as? List<String> ?: emptyList()
                             val multilingualDoc = Document(q).apply {
-                                append("text", Document("el", text).append("en", "[EN] $text").append("de", "[DE] $text"))
-                                append("options", Document("el", grOptions).append("en", grOptions.map { "[EN] $it" }).append("de", grOptions.map { "[DE] $it" }))
+                                append("text", Document("el", text).append("en", text).append("de", text))
+                                append("options", Document("el", grOptions).append("en", grOptions).append("de", grOptions))
                                 append("isApproved", true)
                                 // Explicitly remove any arabic field if present
                                 remove("ar")
