@@ -257,28 +257,34 @@ fun main() {
 fun translateQuestion(doc: Document, targetLang: String): Document {
     val translated = Document(doc)
     
-    // 1. Handle Linked Multilingual Text
+    // --- 1. Handle Text (Robust Parsing for Mixed Structure) ---
     val textObj = doc.get("text")
-    if (textObj is Document || textObj is Map<*, *>) {
-        val textMap = if (textObj is Document) textObj else Document(textObj as Map<String, Any>)
-        val localizedText = textMap.getString(targetLang) ?: textMap.getString("el") ?: ""
-        translated.append("text", localizedText)
-    } else if (textObj is String) {
-        // Fallback for simple strings: Use pseudo-translation if not Greek
-        translated.append("text", if (targetLang == "el") textObj else "[$targetLang] $textObj")
+    val finalQuestionText = when {
+        textObj is Document || textObj is Map<*, *> -> {
+            val textMap = if (textObj is Document) textObj else Document(textObj as Map<String, Any>)
+            textMap.getString(targetLang) ?: textMap.getString("el") ?: ""
+        }
+        textObj is String -> {
+            if (targetLang == "el") textObj else "[$targetLang] $textObj"
+        }
+        else -> "Σφάλμα κειμένου"
     }
+    translated.append("text", finalQuestionText)
 
-    // 2. Handle Linked Multilingual Options
+    // --- 2. Handle Options (Robust Parsing for Mixed Structure) ---
     val optionsObj = doc.get("options")
-    if (optionsObj is Document || optionsObj is Map<*, *>) {
-        val optionsMap = if (optionsObj is Document) optionsObj else Document(optionsObj as Map<String, Any>)
-        val list = optionsMap.getList(targetLang, String::class.java) ?: optionsMap.getList("el", String::class.java) ?: emptyList()
-        translated.append("options", list)
-    } else if (optionsObj is List<*>) {
-        // Fallback: pseudo-translate list items
-        val originalList = optionsObj as List<String>
-        translated.append("options", if (targetLang == "el") originalList else originalList.map { "[$targetLang] $it" })
+    val finalOptions = when {
+        optionsObj is Document || optionsObj is Map<*, *> -> {
+            val optionsMap = if (optionsObj is Document) optionsObj else Document(optionsObj as Map<String, Any>)
+            optionsMap.getList(targetLang, String::class.java) ?: optionsMap.getList("el", String::class.java) ?: emptyList()
+        }
+        optionsObj is List<*> -> {
+            val originalList = (optionsObj as List<*>).map { it.toString() }
+            if (targetLang == "el") originalList else originalList.map { "[$targetLang] $it" }
+        }
+        else -> emptyList<String>()
     }
+    translated.append("options", finalOptions)
     
     return translated
 }
@@ -740,25 +746,31 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             
             diffCounts.forEach { (diff, targetCount) ->
                 val collected = mutableListOf<Document>()
-                // Fetch from categorized collections only
-                for (cat in ALL_CATEGORIES.shuffled()) {
+                val shuffledCats = ALL_CATEGORIES.shuffled()
+                
+                for (cat in shuffledCats) {
                     if (collected.size >= targetCount) break
                     val fromCat = getQuestionsCollection(cat).find(Filters.eq("difficulty", diff)).toList()
                     collected.addAll(fromCat)
                 }
                 
-                allSoloQuestions.addAll(collected.distinctBy { it.getString("text") }.shuffled().take(targetCount))
+                allSoloQuestions.addAll(collected.distinctBy { 
+                    val t = it.get("text")
+                    if (t is Document) t.getString("el") else t.toString()
+                }.shuffled().take(targetCount))
             }
             
-            // Final fallback: if no questions found at all, try any category
-            if (allSoloQuestions.isEmpty()) {
-                val fallback = getQuestionsCollection("Γενικές Γνώσεις").find().limit(100).toList()
-                allSoloQuestions.addAll(fallback)
+            // --- CRITICAL FALLBACK: If filters fail, grab anything to ensure 100 questions ---
+            if (allSoloQuestions.size < 100) {
+                println("SERVER: Solo pool low (${allSoloQuestions.size}). Fetching fallbacks...")
+                val needed = 100 - allSoloQuestions.size
+                val fallback = getQuestionsCollection("Γενικές Γνώσεις").find().limit(needed * 2).toList()
+                allSoloQuestions.addAll(fallback.take(needed))
             }
             
             // TRANSLATE before sending
             val lang = userLanguages[msg.sender] ?: "el"
-            val translated = allSoloQuestions.map { translateQuestion(it, lang) }
+            val translated = allSoloQuestions.take(100).map { translateQuestion(it, lang) }
             
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(translated)))))
         }
