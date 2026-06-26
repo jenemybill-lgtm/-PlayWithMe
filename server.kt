@@ -22,8 +22,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "3.2"
-const val LATEST_VERSION_CODE = 17
+const val LATEST_VERSION_NAME = "3.2.1"
+const val LATEST_VERSION_CODE = 20
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
@@ -262,7 +262,7 @@ fun translateQuestion(doc: Document, targetLang: String): Document {
     val finalQuestionText = when {
         textObj is Document || textObj is Map<*, *> -> {
             val textMap = if (textObj is Document) textObj else Document(textObj as Map<String, Any>)
-            textMap.getString(targetLang) ?: textMap.getString("el") ?: ""
+            textMap.getString(targetLang) ?: textMap.getString("el") ?: "Κενή ερώτηση"
         }
         textObj is String -> {
             if (targetLang == "el") textObj else "[$targetLang] $textObj"
@@ -590,22 +590,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val setup: Map<String, Any> = gson.fromJson(msg.content, object : TypeToken<Map<String, Any>>() {}.type)
 
                 val count = (setup["count"] as? Double)?.toInt() ?: 10
+                val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
+                val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
                 
-                // HOST-DRIVEN QUESTIONS: Server receives questions from Host and relays them
-                val hostQuestions = setup["questions"] as? List<Map<String, Any>>
-                val isHostDriven = setup["isHostDriven"] as? Boolean ?: false
+                // --- CHANGE: Always fetch from DB for fairness ---
+                println("SERVER: Fetching $count questions from MongoDB for room ${room.code} (Fair Mode)")
+                room.questions = fetchQuestions(questionsColl, count, categories, difficulties)
                 
-                if (hostQuestions != null && isHostDriven) {
-                    println("SERVER: Starting HOST-DRIVEN game with ${hostQuestions.size} questions from ${msg.sender}")
-                    room.questions = hostQuestions.map { Document(it) }
-                } else {
-                    // Fallback only if NOT host driven, but for group we want to avoid this
-                    val count = (setup["count"] as? Double)?.toInt() ?: 10
-                    val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
-                    val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
-                    room.questions = fetchQuestions(questionsColl, count, categories, difficulties)
-                }
-
+                room.extraQuestions = fetchQuestions(questionsColl, 10, listOf("Όλες"), listOf("Όλα"))
                 room.timerSeconds = (setup["timer"] as? Double)?.toInt() ?: 20
                 room.isSuddenDeathEnabled = setup["isSuddenDeath"] as? Boolean ?: true
                 room.isSpeedMode = setup["isSpeedMode"] as? Boolean ?: false
@@ -665,7 +657,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 groupedByCat.forEach { (category, questions) ->
                     val coll = getQuestionsCollection(category)
                     
-                    // Case-insensitive text check for robustness
+                    // SMART SYNC: Case-insensitive text check for robustness
                     val existingTexts = coll.find().projection(Document("text", 1)).toList()
                         .mapNotNull { 
                             val textObj = it.get("text")
@@ -679,12 +671,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         val normalized = text.lowercase(Locale.ROOT).trim()
                         
                         if (!existingTexts.contains(normalized)) {
-                            // AUTO-CONVERT TO MULTILINGUAL ON UPLOAD
+                            // AUTO-TRANSLATE (Prefixing) to all supported languages (EN, DE)
+                            // NO ARABIC (ar) keys allowed
                             val grOptions = q["options"] as? List<String> ?: emptyList()
                             val multilingualDoc = Document(q).apply {
                                 append("text", Document("el", text).append("en", "[EN] $text").append("de", "[DE] $text"))
                                 append("options", Document("el", grOptions).append("en", grOptions.map { "[EN] $it" }).append("de", grOptions.map { "[DE] $it" }))
                                 append("isApproved", true)
+                                // Explicitly remove any arabic field if present
+                                remove("ar")
                             }
                             toInsert.add(multilingualDoc)
                             added++
@@ -696,10 +691,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     }
                 }
                 
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Συγχρονίστηκαν $added νέες ερωτήσεις (Linked Multilingual)!"))))
-                println("SERVER: Bulk Upload (Multilingual) from ${msg.sender} -> Added: $added")
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο έξυπνος συγχρονισμός ολοκληρώθηκε! Προστέθηκαν $added νέες ερωτήσεις και μεταφράστηκαν."))))
+                println("SERVER: Smart Sync from ${msg.sender} -> Added: $added")
             } catch (e: Exception) {
-                println("SERVER ERROR (bulk upload): ${e.message}")
+                println("SERVER ERROR (smart sync): ${e.message}")
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αποτυχία συγχρονισμού: ${e.message}"))))
             }
         }
@@ -739,7 +734,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
         }
 
-        // ==================== SOLO QUESTIONS ====================
         MessageType.GET_SOLO_QUESTIONS -> {
             val allSoloQuestions = mutableListOf<Document>()
             val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
@@ -768,6 +762,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 allSoloQuestions.addAll(fallback.take(needed))
             }
             
+            // Final check - if STILL empty (DB is empty), we must notify
+            if (allSoloQuestions.isEmpty()) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν βρέθηκαν ερωτήσεις στη βάση δεδομένων!"))))
+                return
+            }
+
             // TRANSLATE before sending
             val lang = userLanguages[msg.sender] ?: "el"
             val translated = allSoloQuestions.take(100).map { translateQuestion(it, lang) }
@@ -909,6 +909,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             val approvedDoc = Document(questionDoc).apply {
                                 append("isApproved", true)
                                 append("approvedAt", Date())
+                                // REMOVE ARABIC SUPPORT
+                                remove("ar")
                             }
                             targetColl.insertOne(approvedDoc)
                             println("SERVER: Question $cleanId APPROVED and moved to $category")
@@ -922,8 +924,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
                         }
                     } else {
-                        println("SERVER ERROR: Question $cleanId NOT FOUND in suggested_questions.")
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε στη βάση."))))
+                        println("SERVER ERROR: Question $cleanId NOT FOUND in suggestions during approval.")
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε στις προτάσεις."))))
                     }
                 } catch (e: Exception) {
                     println("APPROVE ERROR: ${e.message}")
@@ -932,34 +934,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
         }
 
-        MessageType.REJECT_QUESTION -> {
-            if (ADMIN_USERS.contains(msg.sender)) {
-                try {
-                    val rawContent = msg.content ?: return
-                    val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
-                    val cleanId = idMatch?.value
-                    
-                    if (cleanId == null || cleanId.length != 24) {
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης (Format Error)."))))
-                        return
-                    }
-
-                    val id = org.bson.types.ObjectId(cleanId)
-                    val result = database.getCollection<Document>("suggested_questions").deleteOne(Filters.eq("_id", id))
-                    
-                    if (result.deletedCount > 0) {
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "REJECTED"))))
-                        println("SERVER: Question $cleanId REJECTED and removed.")
-                    } else {
-                        println("SERVER ERROR: Question $cleanId not found for rejection.")
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε."))))
-                    }
-                } catch (e: Exception) {
-                    println("REJECT ERROR: ${e.message}")
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα απόρριψης: ${e.message}"))))
-                }
-            }
-        }
+        // MessageType.REJECT_QUESTION REMOVED
 
         // ==================== DISCOVER PLAYERS ====================
         MessageType.GET_DISCOVER_PLAYERS -> {
