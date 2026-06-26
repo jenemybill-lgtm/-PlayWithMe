@@ -23,7 +23,7 @@ import java.util.regex.Pattern
 
 // ==================== CONFIG ====================
 const val LATEST_VERSION_NAME = "3.2.1"
-const val LATEST_VERSION_CODE = 20
+const val LATEST_VERSION_CODE = 18
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
@@ -122,94 +122,14 @@ suspend fun initDatabase() {
         val client = MongoClient.create(MONGODB_URI)
         database = client.getDatabase("playwithme")
         println("SERVER: DATABASE CONNECTED SUCCESSFULLY")
-        
-        // 1. Perform one-time migration to categories if needed
-        migrateQuestionsToCategories()
-        
-        // 2. Perform one-time migration to MULTILINGUAL structure
-        migrateQuestionsToMultilingual()
     } catch (e: Exception) {
         println("DATABASE ERROR: ${e.message}")
     }
 }
 
-suspend fun migrateQuestionsToMultilingual() {
-    println("SERVER MIGRATION: Starting multilingual conversion...")
-    var totalMigrated = 0
-    
-    ALL_CATEGORIES.forEach { cat ->
-        val coll = getQuestionsCollection(cat)
-        val questions = coll.find().toList()
-        
-        questions.forEach { doc ->
-            val textObj = doc.get("text")
-            if (textObj is String) {
-                // This is an old-style flat question. Convert it.
-                val grText = textObj
-                val grOptions = doc.getList("options", String::class.java) ?: emptyList()
-                
-                val newText = Document("el", grText)
-                    .append("en", "[EN] $grText") 
-                    .append("de", "[DE] $grText")
-                
-                val newOptions = Document("el", grOptions)
-                    .append("en", grOptions.map { "[EN] $it" })
-                    .append("de", grOptions.map { "[DE] $it" })
-                
-                coll.updateOne(Filters.eq("_id", doc.get("_id")), Updates.combine(
-                    Updates.set("text", newText),
-                    Updates.set("options", newOptions)
-                ))
-                totalMigrated++
-            }
-        }
-    }
-    println("SERVER MIGRATION: Multilingual conversion completed. Migrated $totalMigrated questions.")
-}
-
-suspend fun migrateQuestionsToCategories() {
-    val mainColl = database.getCollection<Document>("questions")
-    val allQuestions = mainColl.find().toList()
-    
-    if (allQuestions.isEmpty()) {
-        println("SERVER MIGRATION: No questions found in generic 'questions' collection. Skipping.")
-        return
-    }
-
-    println("SERVER MIGRATION: Starting move of ${allQuestions.size} questions to categorized collections...")
-    
-    var migratedCount = 0
-    val groupedByCat = allQuestions.groupBy { it.getString("category") ?: "Άλλα" }
-    
-    groupedByCat.forEach { (category, questions) ->
-        val targetColl = getQuestionsCollection(category)
-        
-        // Prevent duplicates in target: check existing texts
-        val existingTexts = targetColl.find().projection(Document("text", 1)).toList()
-            .mapNotNull { it.getString("text") }.toSet()
-            
-        val toInsert = questions.filter { q -> 
-            val text = q.getString("text")
-            text != null && !existingTexts.contains(text)
-        }
-        
-        if (toInsert.isNotEmpty()) {
-            targetColl.insertMany(toInsert)
-            migratedCount += toInsert.size
-        }
-    }
-
-    println("SERVER MIGRATION: Successfully inserted $migratedCount unique questions into categorized collections.")
-    
-    // Now delete the old generic collection
-    mainColl.drop()
-    println("SERVER MIGRATION: Generic 'questions' collection has been DELETED.")
-}
-
 fun main() {
     GlobalScope.launch { 
         initDatabase()
-        watchDatabaseChanges()
     }
     val port = System.getenv("PORT")?.toInt() ?: 8080
 
@@ -296,9 +216,6 @@ suspend fun canonicalName(usersColl: MongoCollection<Document>, raw: String): St
 fun getQuestionsCollection(category: String): MongoCollection<Document> {
     val sanitized = category.trim()
     val collectionName = if (sanitized == "Όλες" || sanitized == "Όλα") {
-        // This is a virtual collection name for fetching logic, 
-        // but for specific inserts/moves, we need a real one.
-        // We shouldn't be inserting into "All".
         "questions_Γενικές Γνώσεις" 
     } else {
         "questions_$sanitized"
@@ -601,16 +518,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 room.timerSeconds = (setup["timer"] as? Double)?.toInt() ?: 20
                 room.isSuddenDeathEnabled = setup["isSuddenDeath"] as? Boolean ?: true
                 room.isSpeedMode = setup["isSpeedMode"] as? Boolean ?: false
+                room.isSuddenDeathActive = false
                 room.isGameRunning = true
                 room.currentQuestionIndex = 0
-                room.isSuddenDeathActive = false
 
                 room.players.forEach { 
                     it.score = 0; it.correctCount = 0; it.wrongCount = 0; it.totalTime = 0; it.isEliminated = false
                 }
 
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
-                // 5-second delay to ensure all participants have opened GameActivity
                 room.gameJob = CoroutineScope(Dispatchers.Default).launch { delay(5000); runGameLoop(room) }
             }
         }
@@ -870,9 +786,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         // ==================== MODERATION (ADMIN) ====================
         MessageType.GET_PENDING_QUESTIONS -> {
             if (ADMIN_USERS.contains(msg.sender)) {
-                val pending = database.getCollection<Document>("suggested_questions")
-                    .find(Filters.eq("isApproved", false)).toList()
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(pending)))))
+                if (msg.content == "CHALLENGES") {
+                    val challenges = database.getCollection<Document>("challenges")
+                        .find(Filters.or(Filters.eq("sender", msg.sender), Filters.eq("receiver", msg.sender))).toList()
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
+                } else {
+                    val pending = database.getCollection<Document>("suggested_questions")
+                        .find(Filters.eq("isApproved", false)).toList()
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(pending)))))
+                }
+            } else if (msg.content == "CHALLENGES") {
+                // Non-admin can also see their own challenges
+                val challenges = database.getCollection<Document>("challenges")
+                    .find(Filters.or(Filters.eq("sender", msg.sender), Filters.eq("receiver", msg.sender))).toList()
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
             }
         }
 
