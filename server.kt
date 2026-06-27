@@ -22,8 +22,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "3.2.2"
-const val LATEST_VERSION_CODE = 19
+const val LATEST_VERSION_NAME = "3.2.3"
+const val LATEST_VERSION_CODE = 22
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
@@ -173,36 +173,9 @@ fun main() {
     }.start(wait = true)
 }
 
-// ==================== TRANSLATION (LINKED MULTILINGUAL) ====================
-fun translateQuestion(doc: Document, targetLang: String): Document {
-    val translated = Document(doc)
-    
-    // --- 1. Handle Text (Robust Parsing for Mixed Structure) ---
-    val textObj = doc.get("text")
-    val finalQuestionText = when {
-        textObj is Document || textObj is Map<*, *> -> {
-            val textMap = if (textObj is Document) textObj else Document(textObj as Map<String, Any>)
-            // Check if actual translation exists, otherwise use Greek
-            textMap.getString(targetLang) ?: textMap.getString("el") ?: "Κενή ερώτηση"
-        }
-        textObj is String -> textObj
-        else -> "Σφάλμα κειμένου"
-    }
-    translated.append("text", finalQuestionText)
-
-    // --- 2. Handle Options (Robust Parsing for Mixed Structure) ---
-    val optionsObj = doc.get("options")
-    val finalOptions = when {
-        optionsObj is Document || optionsObj is Map<*, *> -> {
-            val optionsMap = if (optionsObj is Document) optionsObj else Document(optionsObj as Map<String, Any>)
-            optionsMap.getList(targetLang, String::class.java) ?: optionsMap.getList("el", String::class.java) ?: emptyList()
-        }
-        optionsObj is List<*> -> (optionsObj as List<*>).map { it.toString() }
-        else -> emptyList<String>()
-    }
-    translated.append("options", finalOptions)
-    
-    return translated
+// ==================== TRANSLATION (REMOVED - GREEK ONLY) ====================
+fun translateQuestion(doc: Document): Document {
+    return doc
 }
 suspend fun canonicalName(usersColl: MongoCollection<Document>, raw: String): String {
     val doc = usersColl.find(Filters.regex("name", "^${Pattern.quote(raw)}$", "i")).toList().firstOrNull()
@@ -211,11 +184,12 @@ suspend fun canonicalName(usersColl: MongoCollection<Document>, raw: String): St
 
 fun getQuestionsCollection(category: String): MongoCollection<Document> {
     val sanitized = category.trim()
-    val collectionName = if (sanitized == "Όλες" || sanitized == "Όλα") {
-        "questions_Γενικές Γνώσεις" 
+    val base = if (sanitized == "Όλες" || sanitized == "Όλα") {
+        "Γενικές Γνώσεις" 
     } else {
-        "questions_$sanitized"
+        sanitized
     }
+    val collectionName = "questions_$base"
     return database.getCollection<Document>(collectionName)
 }
 
@@ -256,10 +230,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val official = canonicalName(usersColl, name)
             onlineUsers[official] = session
             
-            // Save preferred language
-            val lang = msg.content ?: "el"
-            userLanguages[official] = lang
-
+            // Preferred language removed - Greek only
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
             
             // Pending Messages
@@ -506,9 +477,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
                 val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
                 
-                // --- CHANGE: Always fetch from DB for fairness ---
-                println("SERVER: Fetching $count questions from MongoDB for room ${room.code} (Fair Mode)")
-                room.questions = fetchQuestions(questionsColl, count, categories, difficulties)
+                // --- ALWAYS FETCH FROM DB (Greek Only) ---
+                room.questions = fetchQuestions(count, categories, difficulties)
                 
                 room.timerSeconds = (setup["timer"] as? Double)?.toInt() ?: 20
                 room.isSuddenDeathEnabled = setup["isSuddenDeath"] as? Boolean ?: true
@@ -562,51 +532,38 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val newQuestions: List<Map<String, Any>> = gson.fromJson(msg.content, listType)
                 var added = 0
                 
-                // Group questions by category for batch insertion
-                val groupedByCat = newQuestions.groupBy { it["category"]?.toString() ?: "Άλλα" }
-                
-                groupedByCat.forEach { (category, questions) ->
-                    val coll = getQuestionsCollection(category)
+                newQuestions.forEach { q ->
+                    val text = q["text"] as? String ?: return@forEach
+                    val category = q["category"]?.toString() ?: "Άλλα"
+                    val difficulty = q["difficulty"]?.toString() ?: "Μέτριο"
+                    val options = q["options"] as? List<String> ?: emptyList()
+                    val correctIdx = (q["correctAnswerIndex"] as? Double)?.toInt() ?: 0
                     
-                    // SMART SYNC: Case-insensitive text check for robustness
-                    val existingTexts = coll.find().projection(Document("text", 1)).toList()
-                        .mapNotNull { 
-                            val textObj = it.get("text")
-                            if (textObj is Document) textObj.getString("el")?.lowercase(Locale.ROOT)?.trim()
-                            else textObj?.toString()?.lowercase(Locale.ROOT)?.trim()
-                        }.toSet()
+                    // 1. Generate Unique ID for this question set
+                    val qid = q["qid"]?.toString() ?: UUID.randomUUID().toString().take(8)
                     
-                    val toInsert = mutableListOf<Document>()
-                    questions.forEach { q ->
-                        val text = q["text"] as? String ?: return@forEach
-                        val normalized = text.lowercase(Locale.ROOT).trim()
-                        
-                        if (!existingTexts.contains(normalized)) {
-                            // --- AUTO-CONVERT ON UPLOAD ---
-                            // Since we don't have a translation API key, we store the Greek text for all slots.
-                            // In a real scenario, you'd call Google/DeepL API here.
-                            val grOptions = q["options"] as? List<String> ?: emptyList()
-                            val multilingualDoc = Document(q).apply {
-                                append("text", Document("el", text).append("en", text).append("de", text))
-                                append("options", Document("el", grOptions).append("en", grOptions).append("de", grOptions))
-                                append("isApproved", true)
-                                // Explicitly remove any arabic field if present
-                                remove("ar")
-                            }
-                            toInsert.add(multilingualDoc)
-                            added++
-                        }
-                    }
+                    // 2. Check if already exists in EL collection (now the only collection)
+                    val targetColl = getQuestionsCollection(category)
+                    val exists = targetColl.find(Filters.eq("qid", qid)).firstOrNull() != null
                     
-                    if (toInsert.isNotEmpty()) {
-                        coll.insertMany(toInsert)
+                    if (!exists) {
+                        // 3. Save Question
+                        val doc = Document("qid", qid)
+                            .append("text", text)
+                            .append("options", options)
+                            .append("correctAnswerIndex", correctIdx)
+                            .append("category", category)
+                            .append("difficulty", difficulty)
+                            .append("isApproved", true)
+                        targetColl.insertOne(doc)
+                        added++
                     }
                 }
                 
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο έξυπνος συγχρονισμός ολοκληρώθηκε! Προστέθηκαν $added νέες ερωτήσεις και μεταφράστηκαν."))))
-                println("SERVER: Smart Sync from ${msg.sender} -> Added: $added")
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο συγχρονισμός ολοκληρώθηκε! Προστέθηκαν $added νέες ερωτήσεις."))))
+                println("SERVER: Folder Sync from ${msg.sender} -> Added: $added")
             } catch (e: Exception) {
-                println("SERVER ERROR (smart sync): ${e.message}")
+                println("SERVER ERROR (folder sync): ${e.message}")
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αποτυχία συγχρονισμού: ${e.message}"))))
             }
         }
@@ -648,6 +605,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.GET_SOLO_QUESTIONS -> {
             val allSoloQuestions = mutableListOf<Document>()
+            
+            // Fetch questions across ALL categories to ensure we have enough
             val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
             
             diffCounts.forEach { (diff, targetCount) ->
@@ -660,18 +619,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     collected.addAll(fromCat)
                 }
                 
-                allSoloQuestions.addAll(collected.distinctBy { 
-                    val t = it.get("text")
-                    if (t is Document) t.getString("el") else t.toString()
-                }.shuffled().take(targetCount))
-            }
-            
-            // --- CRITICAL FALLBACK: If filters fail, grab anything to ensure 100 questions ---
-            if (allSoloQuestions.size < 100) {
-                println("SERVER: Solo pool low (${allSoloQuestions.size}). Fetching fallbacks...")
-                val needed = 100 - allSoloQuestions.size
-                val fallback = getQuestionsCollection("Γενικές Γνώσεις").find().limit(needed * 2).toList()
-                allSoloQuestions.addAll(fallback.take(needed))
+                allSoloQuestions.addAll(collected.distinctBy { it.getString("qid") }.shuffled().take(targetCount))
             }
             
             // Final check - if STILL empty (DB is empty), we must notify
@@ -680,11 +628,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 return
             }
 
-            // TRANSLATE before sending
-            val lang = userLanguages[msg.sender] ?: "el"
-            val translated = allSoloQuestions.take(100).map { translateQuestion(it, lang) }
-            
-            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(translated)))))
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SOLO_QUESTIONS_DATA, "Server", gson.toJson(allSoloQuestions)))))
         }
 
         MessageType.CHALLENGE_RESULT -> {
@@ -710,12 +654,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     Updates.set("status", "RECEIVER_WAITING")
                 ))
                 
-                // Notify Receiver with translation
+                // Notify Receiver
                 val target = chal.getString("receiver") ?: return
                 val cats = chal.getString("categories") ?: ""
-                val rawQuestions = chal.get("questions", List::class.java) as? List<Document> ?: emptyList()
-                val targetLang = userLanguages[target] ?: "el"
-                val qJson = gson.toJson(rawQuestions.map { translateQuestion(it, targetLang) })
+                val questions = chal.get("questions", List::class.java) as? List<Document> ?: emptyList()
+                val qJson = gson.toJson(questions)
 
                 val challengeStr = "RANDOM|$sender|$cats|$chalId|$qJson"
                 val targetSession = onlineUsers[target]
@@ -946,16 +889,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val cats2 = updated.getString("p2_cats")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
                 val combinedCats = (cats1 + cats2).distinct()
                 
-                // Fetch questions for the combined categories
-                val questions = fetchQuestions(questionsColl, 10, if (combinedCats.isEmpty()) listOf("Όλες") else combinedCats, listOf("Όλα"))
+                // Fetch questions for the combined categories (Greek only)
+                val questions = fetchQuestions(10, if (combinedCats.isEmpty()) listOf("Όλες") else combinedCats, listOf("Όλα"))
                 
-                val lang1 = userLanguages[p1] ?: "el"
-                val qJson1 = gson.toJson(questions.map { translateQuestion(it, lang1) })
-                onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson1))))
-
-                val lang2 = userLanguages[p2] ?: "el"
-                val qJson2 = gson.toJson(questions.map { translateQuestion(it, lang2) })
-                onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson2))))
+                val qJson = gson.toJson(questions)
+                onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson))))
+                onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson))))
             }
         }
         
@@ -1034,30 +973,22 @@ suspend fun updateDuelStats(coll: MongoCollection<Document>, p1: String, p2: Str
     }
 }
 
-suspend fun fetchQuestions(coll: MongoCollection<Document>, count: Int, cats: List<String>, diffs: List<String>): List<Document> {
+suspend fun fetchQuestions(count: Int, cats: List<String>, diffs: List<String>): List<Document> {
     val allQuestions = mutableListOf<Document>()
-    
     val actualCats = if (cats.contains("Όλες") || cats.contains("Όλα")) ALL_CATEGORIES else cats
     
     actualCats.forEach { cat ->
-        val filter = if (diffs.contains("Όλα") || diffs.contains("Όλα")) {
-            Filters.empty()
-        } else {
-            Filters.`in`("difficulty", diffs)
-        }
-        
-        // Strictly try category specific collection
+        val filter = if (diffs.contains("Όλα")) Filters.empty() else Filters.`in`("difficulty", diffs)
         val fromCat = getQuestionsCollection(cat).find(filter).toList()
         allQuestions.addAll(fromCat)
     }
     
-    // Final sanity fallback: if no questions found at all, grab from 'Γενικές Γνώσεις'
     if (allQuestions.isEmpty()) {
-        println("SERVER: fetchQuestions returned 0 results for cats: $cats, diffs: $diffs. Falling back to General.")
+        println("SERVER: fetchQuestions returned 0 results. Falling back to General EL.")
         allQuestions.addAll(getQuestionsCollection("Γενικές Γνώσεις").find().limit(count * 2).toList())
     }
     
-    return allQuestions.distinctBy { it.getString("text") }.shuffled().take(count)
+    return allQuestions.distinctBy { it.getString("qid") ?: it.getString("text") }.shuffled().take(count)
 }
 
 suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession) {
@@ -1183,20 +1114,18 @@ suspend fun runGameLoop(room: GameRoom) {
     }
 }
 
-suspend fun sendQuestionAndWait(room: GameRoom, question: Document) {
-    val correctIdx = question.getInteger("correctAnswerIndex") ?: 0
+suspend fun sendQuestionAndWait(room: GameRoom, masterQuestion: Document) {
+    val qid = masterQuestion.getString("qid") ?: ""
+    val correctIdx = masterQuestion.getInteger("correctAnswerIndex") ?: 0
     room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
     room.waitingForAnswers = true
     
-    // Structural Broadcast: Individualized translation per participant
+    // Structure: recipients (all in room)
     val recipients = room.players.map { it.session }.toMutableSet()
     recipients.add(room.hostSession)
     
     recipients.forEach { sess ->
-        val name = onlineUsers.entries.find { it.value == sess }?.key
-        val lang = name?.let { userLanguages[it] } ?: "el"
-        val translated = translateQuestion(question, lang)
-        try { sess.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(translated))))) } catch (e: Exception) {}
+        try { sess.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(masterQuestion))))) } catch (e: Exception) {}
     }
 
     var elapsed = 0
@@ -1214,7 +1143,7 @@ suspend fun sendQuestionAndWait(room: GameRoom, question: Document) {
         }
     }
 
-    val options = question.get("options", List::class.java) as? List<String> ?: listOf()
+    val options = masterQuestion.get("options", List::class.java) as? List<String> ?: listOf()
     val statusText = "Σωστή απάντηση: ${options.getOrNull(correctIdx) ?: ""}"
     room.broadcast(GameMessage(MessageType.RESULT, "Server", statusText))
     delay(4000)
