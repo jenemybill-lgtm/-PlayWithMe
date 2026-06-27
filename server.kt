@@ -347,6 +347,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val requester = msg.content?.trim() ?: return
             
             requestsColl.updateOne(Filters.eq("_id", user), Updates.pull("incoming", requester))
+            requestsColl.updateOne(Filters.eq("_id", requester), Updates.pull("outgoing", user))
+
             // Cleanup empty documents
             val myReq = requestsColl.find(Filters.eq("_id", user)).firstOrNull()
             if (myReq != null && (myReq["incoming"] as? List<*>)?.isEmpty() == true && (myReq["outgoing"] as? List<*>)?.isEmpty() == true) {
@@ -425,7 +427,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     val cats = catsStr.split(",")
                     
                     // 2. Fetch Questions
-                    val questions = fetchQuestions(questionsColl, 10, cats, listOf("Όλα"))
+                    val questions = fetchQuestions(10, cats, listOf("Όλα"))
                     
                     val challengeId = "CHAL_${System.currentTimeMillis()}_${(1000..9999).random()}"
                     val chalDoc = Document("_id", challengeId)
@@ -1093,7 +1095,7 @@ suspend fun runGameLoop(room: GameRoom) {
 
             var sdIdx = 0
             // For Sudden Death, we now use the provided questions or a generic fallback if needed
-            val sdQuestions = fetchQuestions(database.getCollection<Document>("questions"), 10, listOf("Όλες"), listOf("Όλα"))
+            val sdQuestions = fetchQuestions(10, listOf("Όλες"), listOf("Όλα"))
             
             while (room.players.count { !it.isEliminated } > 1 && sdIdx < sdQuestions.size && room.isGameRunning) {
                 val q = sdQuestions[sdIdx]
