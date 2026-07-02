@@ -455,8 +455,38 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.RESET_CHALLENGE_LIMIT -> {
             val user = canonicalName(usersColl, msg.sender.trim())
-            usageColl.updateOne(Filters.eq("_id", user), Updates.combine(Updates.set("bonus_charges", 3), Updates.setOnInsert("_id", user)), UpdateOptions().upsert(true))
+            usageColl.updateOne(
+                Filters.eq("_id", user), 
+                Updates.combine(
+                    Updates.set("bonus_charges", 3), 
+                    Updates.setOnInsert("_id", user)
+                ), 
+                UpdateOptions().upsert(true)
+            )
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "LIMIT_RESET_OK"))))
+        }
+
+        MessageType.PLAYER_STATS -> {
+            val user = canonicalName(usersColl, msg.sender.trim())
+            val doc = usageColl.find(Filters.eq("_id", user)).firstOrNull()
+            
+            val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
+            
+            val blitzTimestamps = doc?.getList("blitz_timestamps", Long::class.javaObjectType) ?: emptyList()
+            val recentBlitz = blitzTimestamps.filter { it > dayAgo }.size
+            val blitzBonus = doc?.getInteger("blitz_bonus") ?: 0
+            val remainingBlitz = (5 - recentBlitz + blitzBonus).coerceIn(0, 5)
+
+            val chalTimestamps = doc?.getList("timestamps", Long::class.javaObjectType) ?: emptyList()
+            val recentChal = chalTimestamps.filter { it > dayAgo }.size
+            val chalBonus = doc?.getInteger("bonus_charges") ?: 0
+            val remainingChal = (3 - recentChal + chalBonus).coerceIn(0, 3)
+
+            val stats = mapOf(
+                "blitzRemaining" to remainingBlitz,
+                "challengeRemaining" to remainingChal
+            )
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PLAYER_STATS, "Server", gson.toJson(stats)))))
         }
 
         MessageType.WAKE_UP -> {
@@ -695,6 +725,17 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.GET_SOLO_QUESTIONS -> {
+            // Check Blitz Limit if sender is trying to play Blitz
+            // We use a simplified check: if content is "BLITZ", it's a blitz request
+            if (msg.content == "BLITZ") {
+                val limitError = checkChallengeLimit(usageColl, msg.sender, isBlitz = true)
+                if (limitError != null) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "BLITZ_LIMIT_REACHED"))))
+                    return
+                }
+                recordChallenge(usageColl, msg.sender, isBlitz = true)
+            }
+
             val allSoloQuestions = mutableListOf<Document>()
             val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
             
@@ -1383,32 +1424,39 @@ suspend fun sendQuestionAndWait(room: GameRoom, masterQuestion: Document) {
     delay(1000)
 }
 
-suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String): String? {
+suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, isBlitz: Boolean = false): String? {
     val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
     val doc = coll.find(Filters.eq("_id", user)).firstOrNull() ?: return null
     
-    val bonus = doc.getInteger("bonus_charges") ?: 0
+    val field = if (isBlitz) "blitz_bonus" else "bonus_charges"
+    val timestampField = if (isBlitz) "blitz_timestamps" else "timestamps"
+    val maxLimit = if (isBlitz) 5 else 3
+
+    val bonus = doc.getInteger(field) ?: 0
     if (bonus > 0) return null
     
-    val timestamps = doc.getList("timestamps", Long::class.javaObjectType) ?: emptyList()
+    val timestamps = doc.getList(timestampField, Long::class.javaObjectType) ?: emptyList()
     val recent = timestamps.filter { it > dayAgo }
     
-    if (recent.size >= 3) return "LIMIT_REACHED"
+    if (recent.size >= maxLimit) return "LIMIT_REACHED"
     return null
 }
 
-suspend fun recordChallenge(coll: MongoCollection<Document>, user: String) {
+suspend fun recordChallenge(coll: MongoCollection<Document>, user: String, isBlitz: Boolean = false) {
     val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
     val doc = coll.find(Filters.eq("_id", user)).firstOrNull()
     
-    val bonus = doc?.getInteger("bonus_charges") ?: 0
+    val field = if (isBlitz) "blitz_bonus" else "bonus_charges"
+    val timestampField = if (isBlitz) "blitz_timestamps" else "timestamps"
+
+    val bonus = doc?.getInteger(field) ?: 0
     if (bonus > 0) {
-        coll.updateOne(Filters.eq("_id", user), Updates.inc("bonus_charges", -1))
+        coll.updateOne(Filters.eq("_id", user), Updates.inc(field, -1))
         return
     }
     
-    val timestamps = (doc?.getList("timestamps", Long::class.javaObjectType) ?: emptyList()).filter { it > dayAgo }.toMutableList()
+    val timestamps = (doc?.getList(timestampField, Long::class.javaObjectType) ?: emptyList()).filter { it > dayAgo }.toMutableList()
     timestamps.add(System.currentTimeMillis())
     
-    coll.updateOne(Filters.eq("_id", user), Updates.combine(Updates.set("timestamps", timestamps), Updates.setOnInsert("_id", user)), UpdateOptions().upsert(true))
+    coll.updateOne(Filters.eq("_id", user), Updates.combine(Updates.set(timestampField, timestamps), Updates.setOnInsert("_id", user)), UpdateOptions().upsert(true))
 }
