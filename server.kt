@@ -965,7 +965,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val duelId = duel.getString("_id")
             val isLive = duel.getBoolean("isLive") ?: false
             
-            val responseStr = "$duelId|$host|$acceptor|$isLive"
+            val responseStr = "$duelId|$host|$acceptor|${!isLive}"
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
         }
 
@@ -988,10 +988,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             
             val updated = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
             
-            // Fetch or generate questions
+            // Fetch or generate questions if not already there
             var questions = updated.get("questions", List::class.java) as? List<Document>
             if (questions == null) {
-                // Generate questions based on FIRST player's ready signal (or both if we waited)
                 val cats1 = updated.getString("p1_cats")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
                 val cats2 = updated.getString("p2_cats")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
                 val combinedCats = (cats1 + cats2).distinct()
@@ -1000,12 +999,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("questions", questions))
             }
             
-            // Send START_GAME to the player who just signaled ready
-            val gameSetup = mapOf(
-                "timer" to 20,
-                "questions" to gson.toJson(questions)
-            )
-            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(gameSetup)))))
+            val isLive = updated.getBoolean("isLive") ?: false
+            val gameSetup = mapOf("timer" to 20, "questions" to gson.toJson(questions))
+            val setupJson = gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(gameSetup)))
+
+            if (isLive) {
+                // For LIVE, only start when BOTH are ready
+                if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
+                    val p1 = updated.getString("player1") ?: ""
+                    val p2 = updated.getString("player2") ?: ""
+                    onlineUsers[p1]?.send(Frame.Text(setupJson))
+                    onlineUsers[p2]?.send(Frame.Text(setupJson))
+                }
+            } else {
+                // For ASYNC, start IMMEDIATELY for the player who just ready-ed
+                session.send(Frame.Text(setupJson))
+            }
         }
         
         MessageType.DUEL_FINISH -> {
