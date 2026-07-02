@@ -576,47 +576,45 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             try {
                 val listType = object : TypeToken<List<Map<String, Any>>>() {}.type
                 val newQuestions: List<Map<String, Any>> = gson.fromJson(msg.content, listType)
-                var added = 0
                 
+                // 1. Reset: Delete all categorized collections and suggested_questions
+                ALL_CATEGORIES.forEach { cat ->
+                    val coll = getQuestionsCollection(cat)
+                    runBlocking { coll.deleteMany(Document()) }
+                }
+                runBlocking { database.getCollection<Document>("suggested_questions").deleteMany(Document()) }
+                
+                // 2. Delete the legacy "local" folder (if it refers to a collection named "local")
+                try {
+                    runBlocking { database.getCollection<Document>("local").drop() }
+                } catch (e: Exception) {}
+
+                var added = 0
                 // Group questions by category for batch insertion
-                val groupedByCat = newQuestions.groupBy { it["category"]?.toString() ?: "Άλλα" }
+                val groupedByCat = newQuestions.filter { it.containsKey("text") }.groupBy { it["category"]?.toString() ?: "Άλλα" }
                 
                 groupedByCat.forEach { (category, questions) ->
                     val coll = getQuestionsCollection(category)
-                    
-                    // Case-insensitive text check for robustness
-                    val existingTexts = coll.find().projection(Document("text", 1)).toList()
-                        .mapNotNull { it.getString("text")?.lowercase(Locale.ROOT)?.trim() }.toSet()
-                    
-                    val toInsert = mutableListOf<Document>()
-                    questions.forEach { q ->
-                        val text = q["text"] as? String ?: return@forEach
-                        val normalized = text.lowercase(Locale.ROOT).trim()
-                        
-                        if (!existingTexts.contains(normalized)) {
-                            // Save as plain Greek document
-                            val options = q["options"] as? List<String> ?: emptyList()
-                            val doc = Document("text", text)
-                                .append("options", options)
-                                .append("correctAnswerIndex", (q["correctAnswerIndex"] as? Double)?.toInt() ?: 0)
-                                .append("category", category)
-                                .append("difficulty", q["difficulty"]?.toString() ?: "Μέτριο")
-                                .append("isApproved", true)
-                            toInsert.add(doc)
-                            added++
-                        }
+                    val toInsert = questions.map { q ->
+                        Document("text", q["text"]?.toString() ?: "")
+                            .append("options", q["options"] as? List<String> ?: emptyList<String>())
+                            .append("correctAnswerIndex", (q["correctAnswerIndex"] as? Double)?.toInt() ?: 0)
+                            .append("category", category)
+                            .append("difficulty", q["difficulty"]?.toString() ?: "Μέτριο")
+                            .append("isApproved", true)
                     }
                     
                     if (toInsert.isNotEmpty()) {
-                        coll.insertMany(toInsert)
+                        runBlocking { coll.insertMany(toInsert) }
+                        added += toInsert.size
                     }
                 }
                 
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο έξυπνος συγχρονισμός ολοκληρώθηκε! Προστέθηκαν $added νέες ερωτήσεις."))))
-                println("SERVER: Smart Sync (Greek) from ${msg.sender} -> Added: $added")
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η βάση δεδομένων αντικαταστάθηκε επιτυχώς με $added ερωτήσεις!"))))
+                println("SERVER: DATABASE RESET AND OVERWRITTEN by ${msg.sender} -> Total: $added")
             } catch (e: Exception) {
-                println("SERVER ERROR (bulk sync): ${e.message}")
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αποτυχία συγχρονισμού: ${e.message}"))))
+                println("SERVER ERROR (bulk reset): ${e.message}")
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αποτυχία επαναφοράς: ${e.message}"))))
             }
         }
 
@@ -903,10 +901,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             .append("player1", host)
                             .append("player2", opponentName)
                             .append("status", "SETUP")
-                            .append("isLive", true)
+                            .append("isLive", true) // Random matches are usually live
                             .append("p1_ready", false)
                             .append("p2_ready", false)
                             .append("isRandom", true)
+                            .append("p1_cats", parts.getOrNull(2) ?: "")
                             .append("createdAt", Date())
                         
                         duelsColl.insertOne(duelDoc)
@@ -932,7 +931,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     if (openDuel != null) {
                         val duelId = openDuel.getString("_id")
                         val p1 = openDuel.getString("player1")
-                        duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("player2", host))
+                        duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(
+                            Updates.set("player2", host),
+                            Updates.set("p2_cats", parts.getOrNull(2) ?: "")
+                        ))
                         
                         val setupStr = "$duelId|$p1|$host|true" // true = async
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
@@ -946,6 +948,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             .append("isLive", false)
                             .append("p1_ready", false)
                             .append("p2_ready", false)
+                            .append("p1_cats", parts.getOrNull(2) ?: "")
                             .append("createdAt", Date())
                         duelsColl.insertOne(duelDoc)
 
