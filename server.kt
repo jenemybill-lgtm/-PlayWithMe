@@ -131,38 +131,40 @@ suspend fun initDatabase() {
 }
 
 suspend fun migrateToFinalGreekSchema() {
-    ALL_CATEGORIES.forEach { cat ->
-        val coll = getQuestionsCollection(cat)
+    val collections = ALL_CATEGORIES.map { getQuestionsCollection(it) }.toMutableList()
+    collections.add(database.getCollection<Document>("suggested_questions"))
+
+    collections.forEach { coll ->
         val questions = coll.find().toList()
         
         questions.forEach { doc ->
-            val update = Document()
-            var changed = false
+            val updates = mutableListOf<org.bson.conversions.Bson>()
             
             // 1. Simplify Text
             val textObj = doc.get("text")
             if (textObj is Document || textObj is Map<*, *>) {
                 val textMap = if (textObj is Document) textObj else Document(textObj as Map<String, Any>)
-                update.append("text", textMap.getString("el") ?: "")
-                changed = true
+                updates.add(Updates.set("text", textMap.getString("el") ?: ""))
             }
 
             // 2. Simplify Options
             val optionsObj = doc.get("options")
             if (optionsObj is Document || optionsObj is Map<*, *>) {
                 val optionsMap = if (optionsObj is Document) optionsObj else Document(optionsObj as Map<String, Any>)
-                update.append("options", optionsMap.getList("el", String::class.java) ?: emptyList<String>())
-                changed = true
+                updates.add(Updates.set("options", optionsMap.getList("el", String::class.java) ?: emptyList<String>()))
             }
             
             // 3. Remove qid
             if (doc.containsKey("qid")) {
-                update.append("qid", Updates.unset("qid"))
-                changed = true
+                updates.add(Updates.unset("qid"))
             }
+
+            // 4. Remove en/ar if they exist as top-level fields (legacy)
+            if (doc.containsKey("en")) updates.add(Updates.unset("en"))
+            if (doc.containsKey("ar")) updates.add(Updates.unset("ar"))
             
-            if (changed) {
-                coll.updateOne(Filters.eq("_id", doc.get("_id")), Document("\$set", update))
+            if (updates.isNotEmpty()) {
+                coll.updateOne(Filters.eq("_id", doc.get("_id")), Updates.combine(updates))
             }
         }
     }
@@ -273,6 +275,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val name = msg.sender.trim() // sender is username
             val official = canonicalName(usersColl, name)
             onlineUsers[official] = session
+            
+            // Trigger Migration if ADMIN logs in
+            if (ADMIN_USERS.contains(official)) {
+                CoroutineScope(Dispatchers.Default).launch { 
+                    migrateToFinalGreekSchema() 
+                    println("SERVER: Admin $official logged in, migration re-triggered.")
+                }
+            }
             
             // Preferred language removed - Greek only
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
@@ -811,12 +821,27 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         val existing = targetColl.find(Filters.eq("text", text)).firstOrNull()
                         
                         if (existing == null) {
-                            // 3. Move to proper collection with approved flag
+                            // 3. Move to proper collection with approved flag and SIMPLIFIED schema
                             val approvedDoc = Document(questionDoc).apply {
                                 append("isApproved", true)
                                 append("approvedAt", Date())
-                                // REMOVE ARABIC SUPPORT
                                 remove("ar")
+                                remove("en")
+                                remove("qid")
+                                
+                                // Simplify text if it's an object
+                                val textVal = get("text")
+                                if (textVal is Document || textVal is Map<*, *>) {
+                                    val textMap = if (textVal is Document) textVal else Document(textVal as Map<String, Any>)
+                                    append("text", textMap.getString("el") ?: "")
+                                }
+                                
+                                // Simplify options if it's an object
+                                val optVal = get("options")
+                                if (optVal is Document || optVal is Map<*, *>) {
+                                    val optMap = if (optVal is Document) optVal else Document(optVal as Map<String, Any>)
+                                    append("options", optMap.getList("el", String::class.java) ?: emptyList<String>())
+                                }
                             }
                             targetColl.insertOne(approvedDoc)
                             println("SERVER: Question $cleanId APPROVED and moved to $category")
