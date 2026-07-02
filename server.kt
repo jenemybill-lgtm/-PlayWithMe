@@ -22,8 +22,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "3.2.4"
-const val LATEST_VERSION_CODE = 23
+const val LATEST_VERSION_NAME = "3.4.0"
+const val LATEST_VERSION_CODE = 25
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
@@ -62,7 +62,7 @@ enum class MessageType {
     CHECK_NEW_QUESTIONS, NEW_QUESTIONS_DATA,
     USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS,
     DUEL_CHALLENGE, DUEL_CHALLENGE_RECEIVED, DUEL_ACCEPT, DUEL_SETUP, DUEL_START, DUEL_FINISH, DUEL_RESULT, DUEL_HISTORY_REQUEST, DUEL_HISTORY_DATA,
-    REMOVE_FRIEND, ROOM_PLAYERS_UPDATE, CANCEL_MATCHMAKING
+    REMOVE_FRIEND, ROOM_PLAYERS_UPDATE, CANCEL_MATCHMAKING, RESET_CHALLENGE_LIMIT, WAKE_UP
 }
 
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
@@ -131,6 +131,16 @@ suspend fun initDatabase() {
 }
 
 suspend fun migrateToFinalGreekSchema() {
+    val metaColl = database.getCollection<Document>("metadata")
+    val schemaInfo = metaColl.find(Filters.eq("_id", "schema_version")).firstOrNull()
+    val currentVersion = schemaInfo?.getInteger("version") ?: 0
+    val TARGET_VERSION = 5 // Increment this when logic changes
+
+    if (currentVersion >= TARGET_VERSION) {
+        println("SERVER MIGRATION: Schema already at version $TARGET_VERSION, skipping.")
+        return
+    }
+
     val collections = ALL_CATEGORIES.map { getQuestionsCollection(it) }.toMutableList()
     collections.add(database.getCollection<Document>("suggested_questions"))
 
@@ -168,7 +178,14 @@ suspend fun migrateToFinalGreekSchema() {
             }
         }
     }
-    println("SERVER MIGRATION: Database simplified to Greek-only schema.")
+    
+    metaColl.updateOne(
+        Filters.eq("_id", "schema_version"), 
+        Updates.combine(Updates.set("version", TARGET_VERSION), Updates.setOnInsert("_id", "schema_version")), 
+        UpdateOptions().upsert(true)
+    )
+    
+    println("SERVER MIGRATION: Database simplified to Greek-only schema (v$TARGET_VERSION).")
 }
 
 fun main() {
@@ -187,7 +204,12 @@ fun main() {
                 try {
                     for (frame in incoming) {
                         if (frame is Frame.Text) {
-                            val msg = gson.fromJson(frame.readText(), GameMessage::class.java)
+                            val text = frame.readText()
+                            if (text == "PING") {
+                                send(Frame.Text("PONG"))
+                                continue
+                            }
+                            val msg = gson.fromJson(text, GameMessage::class.java)
                             handleMessage(this, msg)
                         }
                     }
@@ -257,6 +279,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
     val pendingColl = database.getCollection<Document>("pending_messages")
     val duelsColl = database.getCollection<Document>("duels")
     val duelStatsColl = database.getCollection<Document>("duel_stats")
+    val usageColl = database.getCollection<Document>("challenge_usage")
 
     when (msg.type) {
 
@@ -430,6 +453,16 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο παίκτης $friendToRemove αφαιρέθηκε από τους φίλους."))))
         }
 
+        MessageType.RESET_CHALLENGE_LIMIT -> {
+            val user = canonicalName(usersColl, msg.sender.trim())
+            usageColl.updateOne(Filters.eq("_id", user), Updates.combine(Updates.set("bonus_charges", 3), Updates.setOnInsert("_id", user)), UpdateOptions().upsert(true))
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "LIMIT_RESET_OK"))))
+        }
+
+        MessageType.WAKE_UP -> {
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "WAKE_UP_OK"))))
+        }
+
         MessageType.INVITE -> {
             val host = canonicalName(usersColl, msg.sender.trim())
             val target = msg.content ?: return
@@ -524,8 +557,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
                 
                 // --- ALWAYS FETCH FROM DB (Greek Only) ---
-                room.questions = fetchQuestions(count, categories, difficulties)
+                val fetchedQuestions = fetchQuestions(count, categories, difficulties)
+                if (fetchedQuestions.isEmpty()) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν βρέθηκαν ερωτήσεις για αυτά τα φίλτρα!"))))
+                    return
+                }
                 
+                room.questions = fetchedQuestions
                 room.timerSeconds = (setup["timer"] as? Double)?.toInt() ?: 20
                 room.isSuddenDeathEnabled = setup["isSuddenDeath"] as? Boolean ?: true
                 room.isSpeedMode = setup["isSpeedMode"] as? Boolean ?: false
@@ -538,7 +576,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 }
 
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
-                room.gameJob = CoroutineScope(Dispatchers.Default).launch { delay(5000); runGameLoop(room) }
+                room.gameJob = CoroutineScope(Dispatchers.Default).launch { 
+                    delay(3000) // Give clients time to transition
+                    runGameLoop(room) 
+                }
             }
         }
 
@@ -669,6 +710,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 
                 allSoloQuestions.addAll(collected.distinctBy { it.getString("text") }.shuffled().take(targetCount))
             }
+            
+            println("SERVER: GET_SOLO_QUESTIONS requested by ${msg.sender}. Found ${allSoloQuestions.size} questions.")
             
             // Final check - if STILL empty (DB is empty), we must notify
             if (allSoloQuestions.isEmpty()) {
@@ -881,6 +924,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.DUEL_CHALLENGE -> {
             val host = canonicalName(usersColl, msg.sender.trim())
+            
+            // Limit Check
+            val limitError = checkChallengeLimit(usageColl, host)
+            if (limitError != null) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", limitError))))
+                return
+            }
+            recordChallenge(usageColl, host)
+
             val content = msg.content ?: return
             val parts = content.split("|")
             val targetRaw = parts.getOrNull(0) ?: return
@@ -1329,4 +1381,34 @@ suspend fun sendQuestionAndWait(room: GameRoom, masterQuestion: Document) {
 
     room.broadcast(GameMessage(MessageType.LEADERBOARD, "Server", ""))
     delay(1000)
+}
+
+suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String): String? {
+    val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
+    val doc = coll.find(Filters.eq("_id", user)).firstOrNull() ?: return null
+    
+    val bonus = doc.getInteger("bonus_charges") ?: 0
+    if (bonus > 0) return null
+    
+    val timestamps = doc.getList("timestamps", Long::class.javaObjectType) ?: emptyList()
+    val recent = timestamps.filter { it > dayAgo }
+    
+    if (recent.size >= 3) return "LIMIT_REACHED"
+    return null
+}
+
+suspend fun recordChallenge(coll: MongoCollection<Document>, user: String) {
+    val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
+    val doc = coll.find(Filters.eq("_id", user)).firstOrNull()
+    
+    val bonus = doc?.getInteger("bonus_charges") ?: 0
+    if (bonus > 0) {
+        coll.updateOne(Filters.eq("_id", user), Updates.inc("bonus_charges", -1))
+        return
+    }
+    
+    val timestamps = (doc?.getList("timestamps", Long::class.javaObjectType) ?: emptyList()).filter { it > dayAgo }.toMutableList()
+    timestamps.add(System.currentTimeMillis())
+    
+    coll.updateOne(Filters.eq("_id", user), Updates.combine(Updates.set("timestamps", timestamps), Updates.setOnInsert("_id", user)), UpdateOptions().upsert(true))
 }
