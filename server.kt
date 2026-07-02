@@ -849,6 +849,24 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val target = parts.getOrNull(0) ?: return
             val isLive = parts.getOrNull(1) == "LIVE"
             
+            // Create Duel record IMMEDIATELY so sender can go to setup
+            val duelId = "DUEL_${System.currentTimeMillis()}_${(1000..9999).random()}"
+            val duelDoc = Document("_id", duelId)
+                .append("player1", host)
+                .append("player2", target)
+                .append("status", "SETUP")
+                .append("isLive", isLive)
+                .append("p1_ready", false)
+                .append("p2_ready", false)
+                .append("createdAt", Date())
+            
+            duelsColl.insertOne(duelDoc)
+
+            // Send SETUP to sender
+            val responseStr = "$duelId|$host|$target|$isLive"
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
+
+            // Notify Target
             val challengeStr = "$host|$isLive"
             val targetSession = onlineUsers[target]
             if (targetSession != null) {
@@ -862,21 +880,17 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val acceptor = msg.sender
             val host = msg.content?.split("|")?.getOrNull(0) ?: return
             
-            // Generate unique duel ID
-            val duelId = "DUEL_${System.currentTimeMillis()}_${(1000..9999).random()}"
+            // Find the pending duel
+            val duel = duelsColl.find(Filters.and(
+                Filters.eq("player1", host),
+                Filters.eq("player2", acceptor),
+                Filters.eq("status", "SETUP")
+            )).firstOrNull() ?: return
             
-            val duelDoc = Document("_id", duelId)
-                .append("player1", host)
-                .append("player2", acceptor)
-                .append("status", "SETUP")
-                .append("p1_ready", false)
-                .append("p2_ready", false)
-                .append("createdAt", Date())
+            val duelId = duel.getString("_id")
+            val isLive = duel.getBoolean("isLive") ?: false
             
-            duelsColl.insertOne(duelDoc)
-            
-            val responseStr = "$duelId|$host|$acceptor"
-            onlineUsers[host]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
+            val responseStr = "$duelId|$host|$acceptor|$isLive"
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
         }
 
@@ -888,29 +902,35 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             
             val duel = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
             
-            if (player == duel.getString("player1")) {
-                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_ready", true), Updates.set("p1_cats", parts.getOrNull(1) ?: "")))
-            } else {
-                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p2_ready", true), Updates.set("p2_cats", parts.getOrNull(1) ?: "")))
-            }
+            val isP1 = player == duel.getString("player1")
+            val updateField = if (isP1) "p1_ready" else "p2_ready"
+            val catsField = if (isP1) "p1_cats" else "p2_cats"
+            
+            duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(
+                Updates.set(updateField, true),
+                Updates.set(catsField, parts.getOrNull(1) ?: "")
+            ))
             
             val updated = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
-            if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
-                // Both ready, start!
-                val p1 = updated.getString("player1") ?: ""
-                val p2 = updated.getString("player2") ?: ""
-                
+            
+            // Fetch or generate questions
+            var questions = updated.get("questions", List::class.java) as? List<Document>
+            if (questions == null) {
+                // Generate questions based on FIRST player's ready signal (or both if we waited)
                 val cats1 = updated.getString("p1_cats")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
                 val cats2 = updated.getString("p2_cats")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
                 val combinedCats = (cats1 + cats2).distinct()
                 
-                // Fetch questions for the combined categories (Greek only)
-                val questions = fetchQuestions(10, if (combinedCats.isEmpty()) listOf("Όλες") else combinedCats, listOf("Όλα"))
-                
-                val qJson = gson.toJson(questions)
-                onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson))))
-                onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_START, "Server", qJson))))
+                questions = fetchQuestions(10, if (combinedCats.isEmpty()) listOf("Όλες") else combinedCats, listOf("Όλα"))
+                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("questions", questions))
             }
+            
+            // Send START_GAME to the player who just signaled ready
+            val gameSetup = mapOf(
+                "timer" to 20,
+                "questions" to gson.toJson(questions)
+            )
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(gameSetup)))))
         }
         
         MessageType.DUEL_FINISH -> {
