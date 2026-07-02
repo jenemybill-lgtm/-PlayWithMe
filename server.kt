@@ -782,7 +782,19 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 } else {
                     val pending = database.getCollection<Document>("suggested_questions")
                         .find(Filters.eq("isApproved", false)).toList()
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(pending)))))
+                    
+                    // Add Category Counts for Correlation
+                    val stats = mutableMapOf<String, Int>()
+                    ALL_CATEGORIES.forEach { cat ->
+                        stats[cat] = getQuestionsCollection(cat).countDocuments().toInt()
+                    }
+                    
+                    val response = mapOf(
+                        "questions" to pending,
+                        "stats" to stats
+                    )
+                    
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
                 }
             } else if (msg.content == "CHALLENGES") {
                 // Non-admin can also see their own challenges
