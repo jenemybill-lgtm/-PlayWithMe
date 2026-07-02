@@ -62,7 +62,7 @@ enum class MessageType {
     CHECK_NEW_QUESTIONS, NEW_QUESTIONS_DATA,
     USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS,
     DUEL_CHALLENGE, DUEL_CHALLENGE_RECEIVED, DUEL_ACCEPT, DUEL_SETUP, DUEL_START, DUEL_FINISH, DUEL_RESULT, DUEL_HISTORY_REQUEST, DUEL_HISTORY_DATA,
-    REMOVE_FRIEND, ROOM_PLAYERS_UPDATE
+    REMOVE_FRIEND, ROOM_PLAYERS_UPDATE, CANCEL_MATCHMAKING
 }
 
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
@@ -81,6 +81,7 @@ data class FriendInfo(val name: String, var isOnline: Boolean)
 data class RequestLists(val incoming: List<String>, val outgoing: List<String>)
 
 val onlineUsers = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
+val duelMatchmakingQueue = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
 val userLanguages = ConcurrentHashMap<String, String>() // Track preferred language for each user
 val rooms = ConcurrentHashMap<String, GameRoom>()
 val gson = Gson()
@@ -193,6 +194,7 @@ fun main() {
                 val gone = onlineUsers.entries.find { it.value == this }?.key
                 gone?.let {
                     onlineUsers.remove(it)
+                    duelMatchmakingQueue.remove(it)
                     notifyFriendsStatus(it, false)
                 }
 
@@ -846,34 +848,107 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val host = canonicalName(usersColl, msg.sender.trim())
             val content = msg.content ?: return
             val parts = content.split("|")
-            val target = parts.getOrNull(0) ?: return
+            val targetRaw = parts.getOrNull(0) ?: return
             val isLive = parts.getOrNull(1) == "LIVE"
-            
-            // Create Duel record IMMEDIATELY so sender can go to setup
-            val duelId = "DUEL_${System.currentTimeMillis()}_${(1000..9999).random()}"
-            val duelDoc = Document("_id", duelId)
-                .append("player1", host)
-                .append("player2", target)
-                .append("status", "SETUP")
-                .append("isLive", isLive)
-                .append("p1_ready", false)
-                .append("p2_ready", false)
-                .append("createdAt", Date())
-            
-            duelsColl.insertOne(duelDoc)
 
-            // Send SETUP to sender
-            val responseStr = "$duelId|$host|$target|$isLive"
-            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
+            if (targetRaw == "RANDOM") {
+                if (isLive) {
+                    // Find someone else in the queue for LIVE match
+                    val opponentEntry = duelMatchmakingQueue.entries.find { it.key != host }
+                    if (opponentEntry != null) {
+                        val opponentName = opponentEntry.key
+                        val opponentSession = opponentEntry.value
+                        duelMatchmakingQueue.remove(opponentName)
 
-            // Notify Target
-            val challengeStr = "$host|$isLive"
-            val targetSession = onlineUsers[target]
-            if (targetSession != null) {
-                targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_CHALLENGE_RECEIVED, "Server", challengeStr))))
+                        // Pair them!
+                        val duelId = "DUEL_RAND_${System.currentTimeMillis()}_${(1000..9999).random()}"
+                        val duelDoc = Document("_id", duelId)
+                            .append("player1", host)
+                            .append("player2", opponentName)
+                            .append("status", "SETUP")
+                            .append("isLive", true)
+                            .append("p1_ready", false)
+                            .append("p2_ready", false)
+                            .append("isRandom", true)
+                            .append("createdAt", Date())
+                        
+                        duelsColl.insertOne(duelDoc)
+
+                        // Notify both
+                        val setupStr = "$duelId|$host|$opponentName|false" // false = NOT async (live)
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
+                        opponentSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
+                    } else {
+                        // Add to queue
+                        duelMatchmakingQueue[host] = session
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αναμονή για αντίπαλο... (Matchmaking)"))))
+                    }
+                } else {
+                    // ASYNC Random Matchmaking
+                    // 1. Look for an existing "open" random duel created by someone else
+                    val openDuel = duelsColl.find(Filters.and(
+                        Filters.eq("player2", "RANDOM_SEARCH"),
+                        Filters.ne("player1", host),
+                        Filters.eq("isLive", false)
+                    )).firstOrNull()
+
+                    if (openDuel != null) {
+                        val duelId = openDuel.getString("_id")
+                        val p1 = openDuel.getString("player1")
+                        duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("player2", host))
+                        
+                        val setupStr = "$duelId|$p1|$host|true" // true = async
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
+                    } else {
+                        // 2. Create a new open duel and let player start playing NOW
+                        val duelId = "DUEL_RAND_ASYNC_${System.currentTimeMillis()}"
+                        val duelDoc = Document("_id", duelId)
+                            .append("player1", host)
+                            .append("player2", "RANDOM_SEARCH")
+                            .append("status", "SETUP")
+                            .append("isLive", false)
+                            .append("p1_ready", false)
+                            .append("p2_ready", false)
+                            .append("createdAt", Date())
+                        duelsColl.insertOne(duelDoc)
+
+                        val setupStr = "$duelId|$host|Αναμονή...|true"
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
+                    }
+                }
             } else {
-                pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
+                val target = canonicalName(usersColl, targetRaw)
+                // Create Duel record IMMEDIATELY so sender can go to setup
+                val duelId = "DUEL_${System.currentTimeMillis()}_${(1000..9999).random()}"
+                val duelDoc = Document("_id", duelId)
+                    .append("player1", host)
+                    .append("player2", target)
+                    .append("status", "SETUP")
+                    .append("isLive", isLive)
+                    .append("p1_ready", false)
+                    .append("p2_ready", false)
+                    .append("createdAt", Date())
+                
+                duelsColl.insertOne(duelDoc)
+
+                // Send SETUP to sender (challenger) immediately
+                val responseStr = "$duelId|$host|$target|${!isLive}"
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
+
+                // Notify Target
+                val challengeStr = "$host|$isLive"
+                val targetSession = onlineUsers[target]
+                if (targetSession != null) {
+                    targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_CHALLENGE_RECEIVED, "Server", challengeStr))))
+                } else {
+                    pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
+                }
             }
+        }
+
+        MessageType.CANCEL_MATCHMAKING -> {
+            duelMatchmakingQueue.remove(msg.sender)
+            println("SERVER: Matchmaking CANCELLED by ${msg.sender}")
         }
 
         MessageType.DUEL_ACCEPT -> {
