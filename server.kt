@@ -456,48 +456,47 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.RESET_CHALLENGE_LIMIT -> {
             val user = canonicalName(usersColl, msg.sender.trim())
-            usageColl.updateOne(
-                Filters.eq("_id", user), 
-                Updates.combine(
-                    Updates.set("bonus_charges", 5), 
-                    Updates.set("blitz_bonus", 10),
-                    Updates.set("solo_bonus", 20),
-                    Updates.set("timestamps", emptyList<Long>()), // Also clear timestamps to be sure
-                    Updates.set("blitz_timestamps", emptyList<Long>()),
-                    Updates.set("solo_timestamps", emptyList<Long>()),
-                    Updates.setOnInsert("_id", user)
-                ), 
-                UpdateOptions().upsert(true)
-            )
+            val mode = msg.content // "SOLO", "BLITZ", or "DUEL"
+            
+            val updates = mutableListOf<org.bson.conversions.Bson>()
+            when (mode) {
+                "SOLO" -> {
+                    updates.add(Updates.set("solo_bonus", 20))
+                    updates.add(Updates.set("solo_timestamps", emptyList<Long>()))
+                }
+                "BLITZ" -> {
+                    updates.add(Updates.set("blitz_bonus", 10))
+                    updates.add(Updates.set("blitz_timestamps", emptyList<Long>()))
+                }
+                "DUEL" -> {
+                    updates.add(Updates.set("bonus_charges", 5))
+                    updates.add(Updates.set("timestamps", emptyList<Long>()))
+                }
+                else -> {
+                    // Default reset all if no mode specified
+                    updates.add(Updates.set("bonus_charges", 5))
+                    updates.add(Updates.set("blitz_bonus", 10))
+                    updates.add(Updates.set("solo_bonus", 20))
+                    updates.add(Updates.set("timestamps", emptyList<Long>()))
+                    updates.add(Updates.set("blitz_timestamps", emptyList<Long>()))
+                    updates.add(Updates.set("solo_timestamps", emptyList<Long>()))
+                }
+            }
+            updates.add(Updates.setOnInsert("_id", user))
+            
+            usageColl.updateOne(Filters.eq("_id", user), Updates.combine(updates), UpdateOptions().upsert(true))
+            
+            // Send back success and then send fresh stats
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "LIMIT_RESET_OK"))))
+            
+            // Immediately trigger stats update to all listeners
+            val stats = calculateStats(usageColl, user)
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PLAYER_STATS, "Server", gson.toJson(stats)))))
         }
 
         MessageType.PLAYER_STATS -> {
             val user = canonicalName(usersColl, msg.sender.trim())
-            val doc = usageColl.find(Filters.eq("_id", user)).firstOrNull()
-            
-            val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
-            
-            val blitzTimestamps = doc?.getList("blitz_timestamps", Long::class.javaObjectType) ?: emptyList()
-            val recentBlitz = blitzTimestamps.filter { it > dayAgo }.size
-            val blitzBonus = doc?.getInteger("blitz_bonus") ?: 0
-            val remainingBlitz = (5 - recentBlitz + blitzBonus).coerceAtMost(100)
-
-            val chalTimestamps = doc?.getList("timestamps", Long::class.javaObjectType) ?: emptyList()
-            val recentChal = chalTimestamps.filter { it > dayAgo }.size
-            val chalBonus = doc?.getInteger("bonus_charges") ?: 0
-            val remainingChal = (3 - recentChal + chalBonus).coerceAtMost(100)
-            
-            val soloTimestamps = doc?.getList("solo_timestamps", Long::class.javaObjectType) ?: emptyList()
-            val recentSolo = soloTimestamps.filter { it > dayAgo }.size
-            val soloBonus = doc?.getInteger("solo_bonus") ?: 0
-            val remainingSolo = (10 - recentSolo + soloBonus).coerceAtMost(100)
-
-            val stats = mapOf(
-                "blitzRemaining" to remainingBlitz,
-                "challengeRemaining" to remainingChal,
-                "soloRemaining" to remainingSolo
-            )
+            val stats = calculateStats(usageColl, user)
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PLAYER_STATS, "Server", gson.toJson(stats)))))
         }
 
@@ -1449,6 +1448,32 @@ suspend fun sendQuestionAndWait(room: GameRoom, masterQuestion: Document) {
 
     room.broadcast(GameMessage(MessageType.LEADERBOARD, "Server", ""))
     delay(1000)
+}
+
+suspend fun calculateStats(coll: MongoCollection<Document>, user: String): Map<String, Int> {
+    val doc = coll.find(Filters.eq("_id", user)).firstOrNull()
+    val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
+    
+    val blitzTimestamps = doc?.getList("blitz_timestamps", Long::class.javaObjectType) ?: emptyList()
+    val recentBlitz = blitzTimestamps.filter { it > dayAgo }.size
+    val blitzBonus = doc?.getInteger("blitz_bonus") ?: 0
+    val remainingBlitz = (5 - recentBlitz + blitzBonus).coerceAtMost(100)
+
+    val chalTimestamps = doc?.getList("timestamps", Long::class.javaObjectType) ?: emptyList()
+    val recentChal = chalTimestamps.filter { it > dayAgo }.size
+    val chalBonus = doc?.getInteger("bonus_charges") ?: 0
+    val remainingChal = (3 - recentChal + chalBonus).coerceAtMost(100)
+    
+    val soloTimestamps = doc?.getList("solo_timestamps", Long::class.javaObjectType) ?: emptyList()
+    val recentSolo = soloTimestamps.filter { it > dayAgo }.size
+    val soloBonus = doc?.getInteger("solo_bonus") ?: 0
+    val remainingSolo = (10 - recentSolo + soloBonus).coerceAtMost(100)
+
+    return mapOf(
+        "blitzRemaining" to remainingBlitz,
+        "challengeRemaining" to remainingChal,
+        "soloRemaining" to remainingSolo
+    )
 }
 
 suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, isBlitz: Boolean = false, isSolo: Boolean = false): String? {
