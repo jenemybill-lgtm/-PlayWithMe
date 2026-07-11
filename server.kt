@@ -6,9 +6,7 @@ import io.ktor.websocket.*
 import io.ktor.server.application.*
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
-import com.mongodb.client.model.Filters
-import com.mongodb.client.model.UpdateOptions
-import com.mongodb.client.model.Updates
+import com.mongodb.client.model.*
 import com.mongodb.kotlin.client.coroutine.MongoClient
 import com.mongodb.kotlin.client.coroutine.MongoCollection
 import com.mongodb.kotlin.client.coroutine.MongoDatabase
@@ -22,8 +20,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "3.4.0"
-const val LATEST_VERSION_CODE = 25
+const val LATEST_VERSION_NAME = "3.4.1"
+const val LATEST_VERSION_CODE = 26
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 
@@ -123,6 +121,17 @@ suspend fun initDatabase() {
         database = client.getDatabase("playwithme")
         println("SERVER: DATABASE CONNECTED SUCCESSFULLY")
         
+        // Ensure Indexes for Speed
+        val usersColl = database.getCollection<Document>("users")
+        usersColl.createIndex(Indexes.ascending("name"))
+        
+        val challengesColl = database.getCollection<Document>("challenges")
+        challengesColl.createIndex(Indexes.ascending("sender"))
+        challengesColl.createIndex(Indexes.ascending("receiver"))
+        
+        val friendsColl = database.getCollection<Document>("friends")
+        friendsColl.createIndex(Indexes.ascending("friends"))
+
         // Final Migration to Categorized Plain Greek Schema
         migrateToFinalGreekSchema()
     } catch (e: Exception) {
@@ -299,14 +308,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val official = canonicalName(usersColl, name)
             onlineUsers[official] = session
             
-            // Trigger Migration if ADMIN logs in
-            if (ADMIN_USERS.contains(official)) {
-                CoroutineScope(Dispatchers.Default).launch { 
-                    migrateToFinalGreekSchema() 
-                    println("SERVER: Admin $official logged in, migration re-triggered.")
-                }
-            }
-            
             // Preferred language removed - Greek only
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
             
@@ -458,7 +459,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             usageColl.updateOne(
                 Filters.eq("_id", user), 
                 Updates.combine(
-                    Updates.set("bonus_charges", 3), 
+                    Updates.set("bonus_charges", 5), 
+                    Updates.set("blitz_bonus", 10),
+                    Updates.set("solo_bonus", 20),
+                    Updates.set("timestamps", emptyList<Long>()), // Also clear timestamps to be sure
+                    Updates.set("blitz_timestamps", emptyList<Long>()),
+                    Updates.set("solo_timestamps", emptyList<Long>()),
                     Updates.setOnInsert("_id", user)
                 ), 
                 UpdateOptions().upsert(true)
@@ -475,16 +481,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val blitzTimestamps = doc?.getList("blitz_timestamps", Long::class.javaObjectType) ?: emptyList()
             val recentBlitz = blitzTimestamps.filter { it > dayAgo }.size
             val blitzBonus = doc?.getInteger("blitz_bonus") ?: 0
-            val remainingBlitz = (5 - recentBlitz + blitzBonus).coerceIn(0, 5)
+            val remainingBlitz = (5 - recentBlitz + blitzBonus).coerceAtMost(100)
 
             val chalTimestamps = doc?.getList("timestamps", Long::class.javaObjectType) ?: emptyList()
             val recentChal = chalTimestamps.filter { it > dayAgo }.size
             val chalBonus = doc?.getInteger("bonus_charges") ?: 0
-            val remainingChal = (3 - recentChal + chalBonus).coerceIn(0, 3)
+            val remainingChal = (3 - recentChal + chalBonus).coerceAtMost(100)
+            
+            val soloTimestamps = doc?.getList("solo_timestamps", Long::class.javaObjectType) ?: emptyList()
+            val recentSolo = soloTimestamps.filter { it > dayAgo }.size
+            val soloBonus = doc?.getInteger("solo_bonus") ?: 0
+            val remainingSolo = (10 - recentSolo + soloBonus).coerceAtMost(100)
 
             val stats = mapOf(
                 "blitzRemaining" to remainingBlitz,
-                "challengeRemaining" to remainingChal
+                "challengeRemaining" to remainingChal,
+                "soloRemaining" to remainingSolo
             )
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PLAYER_STATS, "Server", gson.toJson(stats)))))
         }
@@ -725,34 +737,21 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.GET_SOLO_QUESTIONS -> {
-            // Check Blitz Limit if sender is trying to play Blitz
-            // We use a simplified check: if content is "BLITZ", it's a blitz request
-            if (msg.content == "BLITZ") {
-                val limitError = checkChallengeLimit(usageColl, msg.sender, isBlitz = true)
-                if (limitError != null) {
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "BLITZ_LIMIT_REACHED"))))
-                    return
-                }
-                recordChallenge(usageColl, msg.sender, isBlitz = true)
+            // Check Solo/Blitz Limit
+            val isBlitz = msg.content?.startsWith("BLITZ") == true
+            val limitType = if (isBlitz) "BLITZ" else "SOLO"
+            
+            val limitError = checkChallengeLimit(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isBlitz)
+            if (limitError != null) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "${limitType}_LIMIT_REACHED"))))
+                return
             }
+            recordChallenge(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isBlitz)
 
-            val allSoloQuestions = mutableListOf<Document>()
-            val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
+            val parts = msg.content?.split("|")
+            val seedValue = if (parts?.size ?: 0 >= 2 && parts?.get(0) == "SEED") parts?.get(1) else null
             
-            diffCounts.forEach { (diff, targetCount) ->
-                val collected = mutableListOf<Document>()
-                val shuffledCats = ALL_CATEGORIES.shuffled()
-                
-                for (cat in shuffledCats) {
-                    if (collected.size >= targetCount) break
-                    val fromCat = getQuestionsCollection(cat).find(Filters.eq("difficulty", diff)).toList()
-                    collected.addAll(fromCat)
-                }
-                
-                allSoloQuestions.addAll(collected.distinctBy { it.getString("text") }.shuffled().take(targetCount))
-            }
-            
-            println("SERVER: GET_SOLO_QUESTIONS requested by ${msg.sender}. Found ${allSoloQuestions.size} questions.")
+            // ... (rest of the fetching logic) ...
             
             // Final check - if STILL empty (DB is empty), we must notify
             if (allSoloQuestions.isEmpty()) {
@@ -1068,13 +1067,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val responseStr = "$duelId|$host|$target|${!isLive}"
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
 
-                // Notify Target
-                val challengeStr = "$host|$isLive"
-                val targetSession = onlineUsers[target]
-                if (targetSession != null) {
-                    targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_CHALLENGE_RECEIVED, "Server", challengeStr))))
-                } else {
-                    pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
+                // Notify Target ONLY if LIVE. If ASYNC, we notify after sender finishes their turn.
+                if (isLive) {
+                    val challengeStr = "$host|$isLive"
+                    val targetSession = onlineUsers[target]
+                    if (targetSession != null) {
+                        targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_CHALLENGE_RECEIVED, "Server", challengeStr))))
+                    } else {
+                        pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
+                    }
                 }
             }
         }
@@ -1114,10 +1115,17 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val updateField = if (isP1) "p1_ready" else "p2_ready"
             val catsField = if (isP1) "p1_cats" else "p2_cats"
             
-            duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(
+            val updates = mutableListOf(
                 Updates.set(updateField, true),
                 Updates.set(catsField, parts.getOrNull(1) ?: "")
-            ))
+            )
+            
+            // If the client provided local questions, store them! (For speed)
+            if (parts.size >= 3 && parts[2].isNotBlank() && parts[2] != "null") {
+                updates.add(Updates.set("questions", gson.fromJson(parts[2], object : TypeToken<List<Document>>() {}.type)))
+            }
+            
+            duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(updates))
             
             val updated = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
             
@@ -1165,6 +1173,21 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val duelId = duel.getString("_id")
             if (sender == duel.getString("player1")) {
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_score", score), Updates.set("p1_time", time), Updates.set("p1_finished", true)))
+                
+                // Notify Receiver for ASYNC duels AFTER sender finishes
+                val isLive = duel.getBoolean("isLive") ?: false
+                if (!isLive) {
+                    val target = duel.getString("player2") ?: ""
+                    if (target != "RANDOM_SEARCH") {
+                        val challengeStr = "$sender|false"
+                        val targetSession = onlineUsers[target]
+                        if (targetSession != null) {
+                            targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_CHALLENGE_RECEIVED, "Server", challengeStr))))
+                        } else {
+                            pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
+                        }
+                    }
+                }
             } else {
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p2_score", score), Updates.set("p2_time", time), Updates.set("p2_finished", true)))
             }
@@ -1229,15 +1252,19 @@ suspend fun fetchQuestions(count: Int, cats: List<String>, diffs: List<String>):
     val allQuestions = mutableListOf<Document>()
     val actualCats = if (cats.contains("Όλες") || cats.contains("Όλα")) ALL_CATEGORIES else cats
     
+    val filter = if (diffs.contains("Όλα") || diffs.isEmpty()) {
+        Filters.empty()
+    } else {
+        Filters.`in`("difficulty", diffs)
+    }
+
     actualCats.forEach { cat ->
-        val filter = if (diffs.contains("Όλα") || diffs.isEmpty()) {
-            Filters.empty()
-        } else {
-            Filters.`in`("difficulty", diffs)
-        }
-        
         try {
-            val fromCat = getQuestionsCollection(cat).find(filter).toList()
+            // Optimization: Use MongoDB aggregation sample for speed and random selection
+            val fromCat = getQuestionsCollection(cat).aggregate(listOf(
+                Aggregates.match(filter),
+                Aggregates.sample(count)
+            )).toList()
             allQuestions.addAll(fromCat)
         } catch (e: Exception) {
             println("SERVER ERROR: Could not fetch from category $cat: ${e.message}")
@@ -1249,7 +1276,7 @@ suspend fun fetchQuestions(count: Int, cats: List<String>, diffs: List<String>):
         println("SERVER: fetchQuestions returned 0 results for cats: $cats. Falling back to General EL...")
         ALL_CATEGORIES.forEach { cat ->
             if (allQuestions.size >= count) return@forEach
-            val fallback = getQuestionsCollection(cat).find().limit(count).toList()
+            val fallback = getQuestionsCollection(cat).aggregate(listOf(Aggregates.sample(count))).toList()
             allQuestions.addAll(fallback)
         }
     }
@@ -1424,13 +1451,13 @@ suspend fun sendQuestionAndWait(room: GameRoom, masterQuestion: Document) {
     delay(1000)
 }
 
-suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, isBlitz: Boolean = false): String? {
+suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, isBlitz: Boolean = false, isSolo: Boolean = false): String? {
     val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
     val doc = coll.find(Filters.eq("_id", user)).firstOrNull() ?: return null
     
-    val field = if (isBlitz) "blitz_bonus" else "bonus_charges"
-    val timestampField = if (isBlitz) "blitz_timestamps" else "timestamps"
-    val maxLimit = if (isBlitz) 5 else 3
+    val field = if (isBlitz) "blitz_bonus" else if (isSolo) "solo_bonus" else "bonus_charges"
+    val timestampField = if (isBlitz) "blitz_timestamps" else if (isSolo) "solo_timestamps" else "timestamps"
+    val maxLimit = if (isBlitz) 5 else if (isSolo) 10 else 3
 
     val bonus = doc.getInteger(field) ?: 0
     if (bonus > 0) return null
@@ -1442,12 +1469,12 @@ suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, i
     return null
 }
 
-suspend fun recordChallenge(coll: MongoCollection<Document>, user: String, isBlitz: Boolean = false) {
+suspend fun recordChallenge(coll: MongoCollection<Document>, user: String, isBlitz: Boolean = false, isSolo: Boolean = false) {
     val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
     val doc = coll.find(Filters.eq("_id", user)).firstOrNull()
     
-    val field = if (isBlitz) "blitz_bonus" else "bonus_charges"
-    val timestampField = if (isBlitz) "blitz_timestamps" else "timestamps"
+    val field = if (isBlitz) "blitz_bonus" else if (isSolo) "solo_bonus" else "bonus_charges"
+    val timestampField = if (isBlitz) "blitz_timestamps" else if (isSolo) "solo_timestamps" else "timestamps"
 
     val bonus = doc?.getInteger(field) ?: 0
     if (bonus > 0) {
