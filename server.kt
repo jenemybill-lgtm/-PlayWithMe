@@ -750,7 +750,28 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val parts = msg.content?.split("|")
             val seedValue = if (parts?.size ?: 0 >= 2 && parts?.get(0) == "SEED") parts?.get(1) else null
             
-            // ... (rest of the fetching logic) ...
+            val allSoloQuestions = mutableListOf<Document>()
+            val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
+            
+            diffCounts.forEach { (diff, targetCount) ->
+                val collected = mutableListOf<Document>()
+                val shuffledCats = ALL_CATEGORIES.shuffled(if (seedValue != null) Random(seedValue.hashCode().toLong()) else Random())
+                
+                for (cat in shuffledCats) {
+                    if (collected.size >= targetCount) break
+                    val fromCat = runBlocking { 
+                        getQuestionsCollection(cat).find(Filters.eq("difficulty", diff)).toList()
+                    }
+                    collected.addAll(fromCat)
+                }
+                
+                val pool = collected.distinctBy { it.getString("text") }
+                if (seedValue != null) {
+                    allSoloQuestions.addAll(pool.shuffled(Random(seedValue.hashCode().toLong() + diff.hashCode())).take(targetCount))
+                } else {
+                    allSoloQuestions.addAll(pool.shuffled().take(targetCount))
+                }
+            }
             
             // Final check - if STILL empty (DB is empty), we must notify
             if (allSoloQuestions.isEmpty()) {
@@ -1121,7 +1142,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             
             // If the client provided local questions, store them! (For speed)
             if (parts.size >= 3 && parts[2].isNotBlank() && parts[2] != "null") {
-                updates.add(Updates.set("questions", gson.fromJson(parts[2], object : TypeToken<List<Document>>() {}.type)))
+                val qList: List<Document> = gson.fromJson(parts[2], object : TypeToken<List<Document>>() {}.type)
+                updates.add(Updates.set("questions", qList))
             }
             
             duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(updates))
