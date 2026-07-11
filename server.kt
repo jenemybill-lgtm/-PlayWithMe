@@ -293,19 +293,43 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
     when (msg.type) {
 
         MessageType.REGISTER -> {
-            val name = msg.content?.trim() ?: return
+            val parts = msg.content?.split("|")
+            val name = parts?.getOrNull(0)?.trim() ?: return
+            val password = parts?.getOrNull(1)?.trim() ?: ""
+
             val existing = usersColl.find(Filters.regex("name", "^${Pattern.quote(name)}$", "i")).firstOrNull()
             if (existing != null) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "EXISTS"))))
                 return
             }
-            usersColl.insertOne(Document("name", name).append("createdAt", Date()))
+            
+            val userDoc = Document("name", name).append("createdAt", Date())
+            if (password.isNotEmpty()) {
+                userDoc.append("password", password)
+            }
+            usersColl.insertOne(userDoc)
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "OK"))))
         }
 
         MessageType.LOGIN -> {
-            val name = msg.sender.trim() // sender is username
-            val official = canonicalName(usersColl, name)
+            val parts = msg.content?.split("|")
+            val name = (parts?.getOrNull(0) ?: msg.sender).trim()
+            val password = parts?.getOrNull(1)?.trim() ?: ""
+
+            val userDoc = usersColl.find(Filters.regex("name", "^${Pattern.quote(name)}$", "i")).firstOrNull()
+            if (userDoc == null) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "NOT_FOUND"))))
+                return
+            }
+
+            val official = userDoc.getString("name") ?: name
+            val storedPassword = userDoc.getString("password") ?: ""
+
+            if (storedPassword.isNotEmpty() && storedPassword != password) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "WRONG_PASSWORD"))))
+                return
+            }
+
             onlineUsers[official] = session
             
             // Preferred language removed - Greek only
@@ -523,21 +547,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val host = canonicalName(usersColl, msg.sender.trim())
             val rawContent = msg.content ?: return
             
+            val challengesColl = database.getCollection<Document>("challenges")
+            
             if (rawContent.startsWith("RANDOM|")) {
-                // 1. Find random opponent from USERS collection
+                // Random opponent from USERS
                 val allUsersExceptMe = usersColl.find(Filters.ne("name", host)).toList()
                 val target = allUsersExceptMe.shuffled().firstOrNull()?.getString("name")
                 
                 if (target != null) {
                     val catsStr = rawContent.substringAfter("RANDOM|")
                     val cats = catsStr.split(",")
-                    
-                    // 2. Fetch Questions (Fixed Signature)
                     val questions = fetchQuestions(10, cats, listOf("Όλα"))
                     
                     val now = System.currentTimeMillis()
                     val challengeId = "CHAL_${now}_${(1000..9999).random()}"
                     val chalDoc = Document("_id", challengeId)
+                        .append("type", "RANDOM")
                         .append("sender", host)
                         .append("receiver", target)
                         .append("categories", catsStr)
@@ -545,27 +570,37 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         .append("timestamp", now)
                         .append("status", "SENDER_WAITING")
                     
-                    database.getCollection<Document>("challenges").insertOne(chalDoc)
+                    challengesColl.insertOne(chalDoc)
                     
-                    // 3. Send setup info to SENDER to play first
                     val setupStr = "$challengeId|$target|${gson.toJson(questions)}"
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_SETUP, "Server", setupStr))))
                 } else {
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν βρέθηκε διαθέσιμος αντίπαλος. Δοκίμασε ξανά!"))))
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν βρέθηκε διαθέσιμος αντίπαλος."))))
                 }
             } else {
-                // Standard direct challenge logic...
+                // Friends Solo Challenge
                 val parts = rawContent.split("|")
-                val target = parts.getOrNull(1) ?: return
-                val seed = parts.getOrNull(2) ?: System.currentTimeMillis().toString()
+                val target = canonicalName(usersColl, parts.getOrNull(1) ?: return)
                 
-                val challengeStr = "SOLO|$host|$seed"
-                val targetSession = onlineUsers[target]
-                if (targetSession != null) {
-                    targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
-                } else {
-                    pendingColl.insertOne(Document("target", target).append("type", "CHALLENGE_RECEIVED").append("content", challengeStr))
-                }
+                // Fetch 10 questions for the challenge
+                val questions = fetchQuestions(10, listOf("Όλες"), listOf("Όλα"))
+                
+                // Let sender play first!
+                val now = System.currentTimeMillis()
+                val challengeId = "SOLO_FRIEND_${now}"
+                val chalDoc = Document("_id", challengeId)
+                    .append("type", "SOLO_FRIEND")
+                    .append("sender", host)
+                    .append("receiver", target)
+                    .append("questions", questions)
+                    .append("timestamp", now)
+                    .append("status", "SENDER_WAITING")
+                
+                challengesColl.insertOne(chalDoc)
+                
+                // Inform sender to start playing
+                val setupStr = "$challengeId|$target|${gson.toJson(questions)}"
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_SETUP, "Server", setupStr))))
             }
         }
 
@@ -807,16 +842,28 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 
                 // Notify Receiver
                 val target = chal.getString("receiver") ?: return
-                val cats = chal.getString("categories") ?: ""
-                val questions = chal.get("questions", List::class.java) as? List<Document> ?: emptyList()
-                val qJson = gson.toJson(questions)
-
-                val challengeStr = "RANDOM|$sender|$cats|$chalId|$qJson"
-                val targetSession = onlineUsers[target]
-                if (targetSession != null) {
-                    targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
+                val type = chal.getString("type") ?: "RANDOM"
+                
+                if (type == "RANDOM") {
+                    val cats = chal.getString("categories") ?: ""
+                    val questions = chal.get("questions", List::class.java) as? List<Document> ?: emptyList()
+                    val challengeStr = "RANDOM|$sender|$cats|$chalId|${gson.toJson(questions)}"
+                    val targetSession = onlineUsers[target]
+                    if (targetSession != null) {
+                        targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
+                    } else {
+                        pendingColl.insertOne(Document("target", target).append("type", "CHALLENGE_RECEIVED").append("content", challengeStr))
+                    }
                 } else {
-                    pendingColl.insertOne(Document("target", target).append("type", "CHALLENGE_RECEIVED").append("content", challengeStr))
+                    // SOLO_FRIEND (also includes questions now)
+                    val questions = chal.get("questions", List::class.java) as? List<Document> ?: emptyList()
+                    val challengeStr = "SOLO|$sender|${chalId}|${gson.toJson(questions)}"
+                    val targetSession = onlineUsers[target]
+                    if (targetSession != null) {
+                        targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_RECEIVED, "Server", challengeStr))))
+                    } else {
+                        pendingColl.insertOne(Document("target", target).append("type", "CHALLENGE_RECEIVED").append("content", challengeStr))
+                    }
                 }
             } else if (isReceiver) {
                 // Receiver finished their turn
