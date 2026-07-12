@@ -736,6 +736,24 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         // ==================== SUGGEST QUESTION ====================
+        MessageType.CHECK_NEW_QUESTIONS -> {
+            try {
+                val lastSync = msg.content?.toLongOrNull() ?: 0L
+                val newQuestions = mutableListOf<Document>()
+                
+                for (cat in ALL_CATEGORIES) {
+                    val fromCat = getQuestionsCollection(cat).find(Filters.gt("approvedAt", Date(lastSync))).toList()
+                    newQuestions.addAll(fromCat)
+                }
+
+                if (newQuestions.isNotEmpty()) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.NEW_QUESTIONS_DATA, "Server", gson.toJson(newQuestions)))))
+                }
+            } catch (e: Exception) {
+                println("CHECK_NEW_QUESTIONS ERROR: ${e.message}")
+            }
+        }
+
         MessageType.SUGGEST_QUESTION -> {
             try {
                 val now = System.currentTimeMillis()
@@ -783,7 +801,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             recordChallenge(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isBlitz)
 
             val parts = msg.content?.split("|")
-            val seedValue = if (parts?.size ?: 0 >= 2 && parts?.get(0) == "SEED") parts?.get(1) else null
+            val seedValue = if (parts != null && parts.size >= 2 && parts[0] == "SEED") parts[1] else null
             
             val allSoloQuestions = mutableListOf<Document>()
             val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
@@ -825,6 +843,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             // Format: CHAL_ID|score|time
             val score = parts.getOrNull(1)?.toIntOrNull() ?: 0
             val time = parts.getOrNull(2)?.toLongOrNull() ?: 0
+
+            // 1. Handle Solo Submission (Direct from game)
+            if (chalId == "SOLO_SUBMIT") {
+                leaderboardColl.updateOne(Filters.eq("name", sender), Updates.combine(Updates.max("maxScore", score), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
+                println("SERVER: Solo Score Submitted for $sender -> $score")
+                return
+            }
+
+            // 2. Handle Blitz Submission
+            if (chalId == "BLITZ_SUBMIT") {
+                database.getCollection<Document>("blitz_leaderboard").updateOne(Filters.eq("name", sender), Updates.combine(Updates.max("maxScore", score), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
+                println("SERVER: Blitz Score Submitted for $sender -> $score")
+                return
+            }
             
             val challengesColl = database.getCollection<Document>("challenges")
             val chal = challengesColl.find(Filters.eq("_id", chalId)).firstOrNull() ?: return
@@ -908,7 +940,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             
             val sortField = if (mode == "DUEL") "wins" else "maxScore"
             
-            val top = targetColl.find().sort(Document(sortField, -1)).limit(50).toList()
+            val top = targetColl.find().sort(Sorts.descending(sortField)).limit(50).toList()
                 .map { 
                     if (mode == "DUEL") {
                         // DuelStats uses _id as name
