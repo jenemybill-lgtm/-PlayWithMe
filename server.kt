@@ -18,12 +18,22 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.regex.Pattern
+import redis.clients.jedis.JedisPool
+import redis.clients.jedis.JedisPoolConfig
 
 // ==================== CONFIG ====================
 const val LATEST_VERSION_NAME = "3.4.1"
 const val LATEST_VERSION_CODE = 26
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
+val REDIS_URL = System.getenv("REDIS_URL") ?: "redis://localhost:6379"
+
+val redisPool = try {
+    JedisPool(JedisPoolConfig(), java.net.URI(REDIS_URL))
+} catch (e: Exception) {
+    println("REDIS ERROR: Invalid URL $REDIS_URL")
+    JedisPool(JedisPoolConfig(), "localhost", 6379)
+}
 
 val ADMIN_USERS = setOf("jenemybill")
 val lastSubmissionTime = ConcurrentHashMap<String, Long>()
@@ -228,6 +238,10 @@ fun main() {
                 gone?.let {
                     onlineUsers.remove(it)
                     duelMatchmakingQueue.remove(it)
+                    redisPool.resource.use { r -> 
+                        r.srem("online_players", it)
+                        r.lrem("matchmaking_queue", 0, it)
+                    }
                     notifyFriendsStatus(it, false)
                 }
 
@@ -331,6 +345,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
 
             onlineUsers[official] = session
+            
+            // Redis: Mark user as online
+            redisPool.resource.use { it.sadd("online_players", official) }
             
             // Preferred language removed - Greek only
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
@@ -1079,36 +1096,35 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             if (targetRaw == "RANDOM") {
                 if (isLive) {
-                    // Find someone else in the queue for LIVE match
-                    val opponentEntry = duelMatchmakingQueue.entries.find { it.key != host }
-                    if (opponentEntry != null) {
-                        val opponentName = opponentEntry.key
-                        val opponentSession = opponentEntry.value
-                        duelMatchmakingQueue.remove(opponentName)
+                    // Redis-based Matchmaking
+                    redisPool.resource.use { r ->
+                        val opponentName = r.lpop("matchmaking_queue")
+                        if (opponentName != null && opponentName != host && onlineUsers.containsKey(opponentName)) {
+                            val opponentSession = onlineUsers[opponentName]
+                            
+                            // Pair them!
+                            val duelId = "DUEL_RAND_${System.currentTimeMillis()}_${(1000..9999).random()}"
+                            val duelDoc = Document("_id", duelId)
+                                .append("player1", host)
+                                .append("player2", opponentName)
+                                .append("status", "SETUP")
+                                .append("isLive", true)
+                                .append("p1_ready", false)
+                                .append("p2_ready", false)
+                                .append("isRandom", true)
+                                .append("p1_cats", parts.getOrNull(2) ?: "")
+                                .append("createdAt", Date())
+                            
+                            duelsColl.insertOne(duelDoc)
 
-                        // Pair them!
-                        val duelId = "DUEL_RAND_${System.currentTimeMillis()}_${(1000..9999).random()}"
-                        val duelDoc = Document("_id", duelId)
-                            .append("player1", host)
-                            .append("player2", opponentName)
-                            .append("status", "SETUP")
-                            .append("isLive", true) // Random matches are usually live
-                            .append("p1_ready", false)
-                            .append("p2_ready", false)
-                            .append("isRandom", true)
-                            .append("p1_cats", parts.getOrNull(2) ?: "")
-                            .append("createdAt", Date())
-                        
-                        duelsColl.insertOne(duelDoc)
-
-                        // Notify both
-                        val setupStr = "$duelId|$host|$opponentName|false" // false = NOT async (live)
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
-                        opponentSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
-                    } else {
-                        // Add to queue
-                        duelMatchmakingQueue[host] = session
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αναμονή για αντίπαλο... (Matchmaking)"))))
+                            val setupStr = "$duelId|$host|$opponentName|false"
+                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
+                            opponentSession?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
+                        } else {
+                            // Add to queue
+                            r.rpush("matchmaking_queue", host)
+                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αναμονή για αντίπαλο... (Matchmaking)"))))
+                        }
                     }
                 } else {
                     // ASYNC Random Matchmaking
