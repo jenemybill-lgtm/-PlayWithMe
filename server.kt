@@ -23,7 +23,7 @@ import redis.clients.jedis.JedisPoolConfig
 
 // ==================== CONFIG ====================
 const val LATEST_VERSION_NAME = "3.4.1"
-const val LATEST_VERSION_CODE = 27
+const val LATEST_VERSION_CODE = 26
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 val REDIS_URL = System.getenv("REDIS_URL") ?: "redis://localhost:6379"
@@ -285,9 +285,17 @@ fun main() {
                 gone?.let {
                     onlineUsers.remove(it)
                     duelMatchmakingQueue.remove(it)
-                    redisPool.resource.use { r -> 
-                        r.srem("online_players", it)
-                        r.lrem("matchmaking_queue", 0, it)
+                    try {
+                        redisPool.resource.use { r -> 
+                            r.srem("online_players", it)
+                            // Clean up all possible matchmaking queues
+                            listOf("TRIVIA", "XERI", "BACKGAMMON", "CHESS").forEach { type ->
+                                r.lrem("matchmaking_queue_$type", 0, it)
+                            }
+                            r.lrem("matchmaking_queue", 0, it) // Legacy cleanup
+                        }
+                    } catch (e: Exception) {
+                        println("REDIS ERROR: Failed cleanup for $it: ${e.message}")
                     }
                     notifyFriendsStatus(it, false)
                 }
@@ -394,7 +402,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             onlineUsers[official] = session
             
             // Redis: Mark user as online
-            redisPool.resource.use { it.sadd("online_players", official) }
+            try {
+                redisPool.resource.use { it.sadd("online_players", official) }
+            } catch (e: Exception) {
+                println("REDIS ERROR: Failed to mark $official online: ${e.message}")
+            }
             
             // Preferred language removed - Greek only
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
@@ -1145,36 +1157,41 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (targetRaw == "RANDOM") {
                 if (isLive) {
                     // Redis-based Matchmaking
-                    redisPool.resource.use { r ->
-                        val queueKey = "matchmaking_queue_$gameType"
-                        val opponentName = r.lpop(queueKey)
-                        if (opponentName != null && opponentName != host && onlineUsers.containsKey(opponentName)) {
-                            val opponentSession = onlineUsers[opponentName]
-                            
-                            // Pair them!
-                            val duelId = "DUEL_${gameType}_${System.currentTimeMillis()}"
-                            val duelDoc = Document("_id", duelId)
-                                .append("player1", host)
-                                .append("player2", opponentName)
-                                .append("status", "SETUP")
-                                .append("isLive", true)
-                                .append("p1_ready", false)
-                                .append("p2_ready", false)
-                                .append("isRandom", true)
-                                .append("gameType", gameType)
-                                .append("p1_cats", parts.getOrNull(2) ?: "")
-                                .append("createdAt", Date())
-                            
-                            duelsColl.insertOne(duelDoc)
+                    try {
+                        redisPool.resource.use { r ->
+                            val queueKey = "matchmaking_queue_$gameType"
+                            val opponentName = r.lpop(queueKey)
+                            if (opponentName != null && opponentName != host && onlineUsers.containsKey(opponentName)) {
+                                val opponentSession = onlineUsers[opponentName]
+                                
+                                // Pair them!
+                                val duelId = "DUEL_${gameType}_${System.currentTimeMillis()}"
+                                val duelDoc = Document("_id", duelId)
+                                    .append("player1", host)
+                                    .append("player2", opponentName)
+                                    .append("status", "SETUP")
+                                    .append("isLive", true)
+                                    .append("p1_ready", false)
+                                    .append("p2_ready", false)
+                                    .append("isRandom", true)
+                                    .append("gameType", gameType)
+                                    .append("p1_cats", parts.getOrNull(2) ?: "")
+                                    .append("createdAt", Date())
+                                
+                                duelsColl.insertOne(duelDoc)
 
-                            val setupStr = "$duelId|$host|$opponentName|false|$gameType"
-                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
-                            opponentSession?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
-                        } else {
-                            // Add to queue
-                            r.rpush(queueKey, host)
-                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αναμονή για αντίπαλο ($gameType)..."))))
+                                val setupStr = "$duelId|$host|$opponentName|false|$gameType"
+                                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
+                                opponentSession?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
+                            } else {
+                                // Add to queue
+                                r.rpush(queueKey, host)
+                                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αναμονή για αντίπαλο ($gameType)..."))))
+                            }
                         }
+                    } catch (e: Exception) {
+                        println("REDIS MATCHMAKING ERROR: ${e.message}")
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα Matchmaking (Redis). Δοκίμασε αργότερα."))))
                     }
                 } else {
                     // ASYNC Random Matchmaking (Trivia only for now)
@@ -1262,8 +1279,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             
             val duelId = duel.getString("_id")
             val isLive = duel.getBoolean("isLive") ?: false
+            val gameType = duel.getString("gameType") ?: "TRIVIA"
             
-            val responseStr = "$duelId|$host|$acceptor|${!isLive}"
+            val responseStr = "$duelId|$host|$acceptor|${!isLive}|$gameType"
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
         }
 
