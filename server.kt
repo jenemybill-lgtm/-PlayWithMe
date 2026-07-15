@@ -23,7 +23,7 @@ import redis.clients.jedis.JedisPoolConfig
 
 // ==================== CONFIG ====================
 const val LATEST_VERSION_NAME = "3.4.1"
-const val LATEST_VERSION_CODE = 1000
+const val LATEST_VERSION_CODE = 27
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 val REDIS_URL = System.getenv("REDIS_URL") ?: "redis://localhost:6379"
