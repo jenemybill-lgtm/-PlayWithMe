@@ -1075,7 +1075,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "${limitType}_LIMIT_REACHED"))))
                 return
             }
-            recordChallenge(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isBlitz)
+            recordChallenge(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isSolo)
 
             val parts = msg.content?.split("|")
             val seedValue = if (parts != null && parts.size >= 2 && parts[0] == "SEED") parts[1] else null
@@ -1969,8 +1969,8 @@ suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
 
             val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
             val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))
-            onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
-            onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
+            onlineUsers[game.player1]?.send(Frame.Text(finalMsg))
+            onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
             cardGames.remove(gameId)
             return
         }
@@ -2185,7 +2185,7 @@ suspend fun sendQuestionAndWait(room: GameRoom, masterQuestion: Document) {
     recipients.add(room.hostSession)
     
     recipients.forEach { sess ->
-        try { CoroutineScope(Dispatchers.IO).launch { sess.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(masterQuestion))))) } } catch (e: Exception) {}
+        try { sess.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(masterQuestion))))) } catch (e: Exception) {}
     }
 
     var elapsed = 0
