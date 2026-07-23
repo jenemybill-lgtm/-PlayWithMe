@@ -204,11 +204,11 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
     var isGameRunning = false
     var gameJob: Job? = null
 
-    suspend fun broadcast(message: GameMessage) {
+    fun broadcast(message: GameMessage) {
         val text = gson.toJson(message)
         val sessions = players.map { it.session }.toMutableSet()
         sessions.add(hostSession)
-        sessions.forEach { try { it.send(Frame.Text(text)) } catch (e: Exception) {} }
+        sessions.forEach { try { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(text)) } } catch (e: Exception) {} }
     }
 
     suspend fun updateHostPlayerCount() {
@@ -358,7 +358,7 @@ fun main() {
                     
                     if (isParticipant || isHost) {
                         if (room.isGameRunning) {
-                            runBlocking { room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποσυνδέθηκε.")) }
+                            room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποσυνδέθηκε."))
                         }
                         room.players.removeIf { it.session == this }
                         if (!isHost) runBlocking { room.updateHostPlayerCount() }
@@ -374,6 +374,7 @@ fun main() {
 fun translateQuestion(doc: Document): Document {
     return doc
 }
+
 suspend fun recordMatchHistory(db: MongoDatabase, p1: String, p2: String, winner: String, gameType: String, difficulty: String? = null) {
     try {
         val historyColl = db.getCollection<Document>("match_history")
@@ -484,6 +485,41 @@ suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
     }
     
     broadcastCardState(gameId, game)
+}
+
+suspend fun checkAndExpireDuels(duelsColl: MongoCollection<Document>, statsColl: MongoCollection<Document>, user: String) {
+    val dayAgo = Date(System.currentTimeMillis() - (24 * 60 * 60 * 1000))
+    val expired = duelsColl.find(Filters.and(
+        Filters.eq("status", "SETUP"),
+        Filters.lt("createdAt", dayAgo),
+        Filters.or(Filters.eq("player1", user), Filters.eq("player2", user))
+    )).toList()
+
+    expired.forEach { d ->
+        val duelId = d.getString("_id")
+        val p1 = d.getString("player1") ?: ""
+        val p2 = d.getString("player2") ?: ""
+        val f1 = d.getBoolean("p1_finished") ?: false
+        val f2 = d.getBoolean("p2_finished") ?: false
+        
+        var winner = ""
+        if (f1 && !f2) winner = p1
+        else if (f2 && !f1) winner = p2
+
+        if (winner != "") {
+            duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("status", "COMPLETED"), Updates.set("winner", winner), Updates.set("expired", true)))
+            updateDuelStats(statsColl, p1, p2, winner)
+            recordMatchHistory(database, p1, p2, winner, d.getString("gameType") ?: "TRIVIA")
+            println("SERVER: Duel $duelId EXPIRED. Winner: $winner by default.")
+        } else {
+            duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("status", "EXPIRED"))
+        }
+    }
+}
+
+suspend fun canonicalName(usersColl: MongoCollection<Document>, raw: String): String {
+    val doc = usersColl.find(Filters.regex("name", "^${Pattern.quote(raw)}$", "i")).toList().firstOrNull()
+    return doc?.getString("name") ?: raw
 }
 
 fun getQuestionsCollection(category: String): MongoCollection<Document> {
@@ -701,7 +737,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             // Sync both
             sendRequestList(user, session)
-            onlineUsers[requester]?.let { sendRequestList(requester, it) }
+            onlineUsers[requester]?.let { sendRequestList(officialTarget, it) }
         }
 
         MessageType.REMOVE_FRIEND -> {
@@ -912,7 +948,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     player.hasAnswered = true
                     player.lastAnswerIndex = parts.getOrNull(0)?.toIntOrNull() ?: -1
                     player.totalTime += parts.getOrNull(1)?.toLongOrNull() ?: 0
-                    if (room.players.filter { !it.isEliminated }.all { it.hasAnswered }) room.waitingForAnswers = false
+                    if (room.players.filter { !it.isEliminated }.all { it.hasAnswered }) {
+                        room.waitingForAnswers = false
+                    }
                 }
             }
         }
@@ -1085,7 +1123,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             // 1. Handle Solo Submission (Direct from game)
             if (chalId == "SOLO_SUBMIT") {
                 leaderboardColl.updateOne(Filters.eq("name", sender), Updates.combine(Updates.max("maxScore", score), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-                recordMatchHistory(database, sender, "CPU", sender, "TRIVIA", "Solo Play")
                 println("SERVER: Solo Score Submitted for $sender -> $score")
                 return
             }
@@ -1093,7 +1130,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             // 2. Handle Blitz Submission
             if (chalId == "BLITZ_SUBMIT") {
                 database.getCollection<Document>("blitz_leaderboard").updateOne(Filters.eq("name", sender), Updates.combine(Updates.max("maxScore", score), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-                recordMatchHistory(database, sender, "CPU", sender, "BLITZ", "Blitz Play")
                 println("SERVER: Blitz Score Submitted for $sender -> $score")
                 return
             }
@@ -1187,7 +1223,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         // DuelStats uses _id as name
                         mapOf("name" to (it.getString("_id") ?: "Anon"), "score" to (it.getInteger("wins") ?: 0))
                     } else {
-                        // Return raw maxScore (no multiplier)
                         mapOf("name" to (it.getString("name") ?: "Anon"), "score" to (it.getInteger("maxScore") ?: 0)) 
                     }
                 }
@@ -1556,6 +1591,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     onlineUsers[p1]?.send(Frame.Text(backgammonMsg))
                     onlineUsers[p2]?.send(Frame.Text(backgammonMsg))
                 }
+            } else if (gameType == "CHESS") {
+                if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
+                    val p1 = updated.getString("player1") ?: ""
+                    val p2 = updated.getString("player2") ?: ""
+                    val chessStartMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "CHESS_START"))
+                    onlineUsers[p1]?.send(Frame.Text(chessStartMsg))
+                    onlineUsers[p2]?.send(Frame.Text(chessStartMsg))
+                }
             } else if (gameType == "UNO") {
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
                     val p1 = updated.getString("player1") ?: ""
@@ -1716,20 +1759,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         } else {
                             pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
                         }
-
-                        // --- ASYNC TIMEOUT PROTECTION ---
-                        // If receiver doesn't finish in 24 hours, player1 wins by default
-                        CoroutineScope(Dispatchers.IO).launch {
-                            delay(86400000) // 24 hours
-                            val d = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull()
-                            if (d != null && d.getString("status") == "SETUP" && d.getBoolean("p1_finished") == true && d.getBoolean("p2_finished") == false) {
-                                println("SERVER: Async Duel $duelId EXPIRED. Player 1 wins by default.")
-                                val p1 = d.getString("player1") ?: ""
-                                val p2 = d.getString("player2") ?: ""
-                                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("status", "COMPLETED"), Updates.set("winner", p1)))
-                                updateDuelStats(duelStatsColl, p1, p2, p1)
-                            }
-                        }
                     }
                 }
             } else {
@@ -1752,20 +1781,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 if (s1 > s2) winner = p1
                 else if (s2 > s1) winner = p2
                 else {
-                    // Draw or check time
                     if (t1 < t2) winner = p1
                     else if (t2 < t1) winner = p2
                 }
                 
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("status", "COMPLETED"), Updates.set("winner", winner)))
                 
-                // Update Stats
+                // Update Stats and History
+                recordMatchHistory(database, p1, p2, winner, gType)
                 updateDuelStats(duelStatsColl, p1, p2, winner)
 
-                // SYNC TO SOLO LEADERBOARD as well
-                val soloColl = database.getCollection<Document>("solo_leaderboard")
-                soloColl.updateOne(Filters.eq("name", p1), Updates.combine(Updates.max("maxScore", s1), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-                soloColl.updateOne(Filters.eq("name", p2), Updates.combine(Updates.max("maxScore", s2), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
+                // Sync to Solo Leaderboard if Trivia
+                if (gType == "TRIVIA") {
+                    val soloColl = database.getCollection<Document>("solo_leaderboard")
+                    soloColl.updateOne(Filters.eq("name", p1), Updates.combine(Updates.max("maxScore", s1), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
+                    soloColl.updateOne(Filters.eq("name", p2), Updates.combine(Updates.max("maxScore", s2), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
+                }
                 
                 val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
                 onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
@@ -1791,7 +1822,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 .limit(50)
                 .toList()
             
-            // Stats calculation...
+            // Calculate specific stats for this mode
             val wins = history.count { it.getString("winner") == official }
             val losses = history.count { it.getString("winner") != official && it.getString("winner") != "" }
             val draws = history.count { it.getString("winner") == "" }
@@ -1920,8 +1951,8 @@ suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
 
             val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
             val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))
-            onlineUsers[game.player1]?.send(Frame.Text(finalMsg))
-            onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
+            onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
+            onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
             cardGames.remove(gameId)
             return
         }
