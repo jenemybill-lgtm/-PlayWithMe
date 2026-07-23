@@ -374,9 +374,116 @@ fun main() {
 fun translateQuestion(doc: Document): Document {
     return doc
 }
-suspend fun canonicalName(usersColl: MongoCollection<Document>, raw: String): String {
-    val doc = usersColl.find(Filters.regex("name", "^${Pattern.quote(raw)}$", "i")).toList().firstOrNull()
-    return doc?.getString("name") ?: raw
+suspend fun recordMatchHistory(db: MongoDatabase, p1: String, p2: String, winner: String, gameType: String, difficulty: String? = null) {
+    try {
+        val historyColl = db.getCollection<Document>("match_history")
+        val record = Document("player1", p1)
+            .append("player2", p2)
+            .append("winner", winner)
+            .append("gameType", gameType)
+            .append("difficulty", difficulty)
+            .append("timestamp", Date())
+        historyColl.insertOne(record)
+        println("SERVER: Match recorded: $p1 vs $p2, Winner: $winner, Type: $gameType")
+    } catch (e: Exception) {
+        println("SERVER ERROR (recordMatchHistory): ${e.message}")
+    }
+}
+
+suspend fun updateDuelStats(coll: MongoCollection<Document>, p1: String, p2: String, winner: String) {
+    if (winner == "CPU" || p1 == "CPU" || p2 == "CPU") return // Don't update global wins for PvE
+
+    if (winner == "") {
+        coll.updateOne(Filters.eq("_id", p1), Updates.combine(Updates.inc("draws", 1), Updates.setOnInsert("_id", p1)), UpdateOptions().upsert(true))
+        coll.updateOne(Filters.eq("_id", p2), Updates.combine(Updates.inc("draws", 1), Updates.setOnInsert("_id", p2)), UpdateOptions().upsert(true))
+    } else {
+        val loser = if (winner == p1) p2 else p1
+        coll.updateOne(Filters.eq("_id", winner), Updates.combine(Updates.inc("wins", 1), Updates.setOnInsert("_id", winner)), UpdateOptions().upsert(true))
+        coll.updateOne(Filters.eq("_id", loser), Updates.combine(Updates.inc("losses", 1), Updates.setOnInsert("_id", loser)), UpdateOptions().upsert(true))
+    }
+}
+
+suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
+    val game = cardGames[gameId] ?: return
+    if (game.status == "FINISHED") return
+    if (game.turn != player) return
+
+    val hand = if (player == game.player1) game.p1Hand else game.p2Hand
+    val card = hand.find { it.id == cardId } ?: return
+
+    hand.remove(card)
+    
+    if (game.table.isNotEmpty()) {
+        val top = game.table.last()
+        if (card.rank == top.rank || card.rank == "J") {
+            // Capture
+            var points = calculateCardPoints(card) + game.table.sumOf { calculateCardPoints(it) }
+            val capturedCount = game.table.size + 1
+            
+            // Xeri detection
+            if (game.table.size == 1 && card.rank == top.rank) {
+                points += if (card.rank == "J") 20 else 10
+            }
+
+            if (player == game.player1) {
+                game.p1Points += points
+                game.p1CardsTaken += capturedCount
+            } else {
+                game.p2Points += points
+                game.p2CardsTaken += capturedCount
+            }
+            game.table.clear()
+            game.lastToTake = player
+        } else {
+            game.table.add(card)
+        }
+    } else {
+        game.table.add(card)
+    }
+
+    // Switch turn
+    game.turn = if (player == game.player1) game.player2 else game.player1
+
+    // Round end detection
+    if (game.p1Hand.isEmpty() && game.p2Hand.isEmpty()) {
+        if (game.deck.isNotEmpty()) {
+            repeat(6) { if (game.deck.isNotEmpty()) game.p1Hand.add(game.deck.removeAt(0)) }
+            repeat(6) { if (game.deck.isNotEmpty()) game.p2Hand.add(game.deck.removeAt(0)) }
+        } else {
+            // Game end
+            game.status = "FINISHED"
+            // Last to take gets remaining table cards
+            if (game.lastToTake == game.player1) {
+                game.p1Points += game.table.sumOf { calculateCardPoints(it) }
+                game.p1CardsTaken += game.table.size
+            } else if (game.lastToTake == game.player2) {
+                game.p2Points += game.table.sumOf { calculateCardPoints(it) }
+                game.p2CardsTaken += game.table.size
+            }
+            game.table.clear()
+
+            // Bonus 3 pts for most cards
+            if (game.p1CardsTaken > game.p2CardsTaken) game.p1Points += 3
+            else if (game.p2CardsTaken > game.p1CardsTaken) game.p2Points += 3
+
+            val winner = if (game.p1Points > game.p2Points) game.player1 
+                         else if (game.p2Points > game.p1Points) game.player2 
+                         else ""
+            
+            val duelStatsColl = database.getCollection<Document>("duel_stats")
+            updateDuelStats(duelStatsColl, game.player1, game.player2, winner)
+            recordMatchHistory(database, game.player1, game.player2, winner, "XERI")
+
+            val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
+            val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))
+            onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
+            onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
+            cardGames.remove(gameId)
+            return
+        }
+    }
+    
+    broadcastCardState(gameId, game)
 }
 
 fun getQuestionsCollection(category: String): MongoCollection<Document> {
@@ -1080,6 +1187,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         // DuelStats uses _id as name
                         mapOf("name" to (it.getString("_id") ?: "Anon"), "score" to (it.getInteger("wins") ?: 0))
                     } else {
+                        // Return raw maxScore (no multiplier)
                         mapOf("name" to (it.getString("name") ?: "Anon"), "score" to (it.getInteger("maxScore") ?: 0)) 
                     }
                 }
@@ -1095,7 +1203,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
                 } else {
                     val pending = database.getCollection<Document>("suggested_questions")
-                        .find(Filters.eq("isApproved", false)).toList()
+                        .find().toList() // Correctly fetch all pending for moderation
                     
                     // Add Category Counts for Correlation
                     val stats = mutableMapOf<String, Int>()
@@ -1608,6 +1716,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         } else {
                             pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
                         }
+
+                        // --- ASYNC TIMEOUT PROTECTION ---
+                        // If receiver doesn't finish in 24 hours, player1 wins by default
+                        CoroutineScope(Dispatchers.IO).launch {
+                            delay(86400000) // 24 hours
+                            val d = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull()
+                            if (d != null && d.getString("status") == "SETUP" && d.getBoolean("p1_finished") == true && d.getBoolean("p2_finished") == false) {
+                                println("SERVER: Async Duel $duelId EXPIRED. Player 1 wins by default.")
+                                val p1 = d.getString("player1") ?: ""
+                                val p2 = d.getString("player2") ?: ""
+                                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("status", "COMPLETED"), Updates.set("winner", p1)))
+                                updateDuelStats(duelStatsColl, p1, p2, p1)
+                            }
+                        }
                     }
                 }
             } else {
@@ -1630,22 +1752,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 if (s1 > s2) winner = p1
                 else if (s2 > s1) winner = p2
                 else {
+                    // Draw or check time
                     if (t1 < t2) winner = p1
                     else if (t2 < t1) winner = p2
                 }
                 
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("status", "COMPLETED"), Updates.set("winner", winner)))
                 
-                // Update Stats and History
-                recordMatchHistory(database, p1, p2, winner, gType)
+                // Update Stats
                 updateDuelStats(duelStatsColl, p1, p2, winner)
 
-                // Sync to Solo Leaderboard if Trivia
-                if (gType == "TRIVIA") {
-                    val soloColl = database.getCollection<Document>("solo_leaderboard")
-                    soloColl.updateOne(Filters.eq("name", p1), Updates.combine(Updates.max("maxScore", s1), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-                    soloColl.updateOne(Filters.eq("name", p2), Updates.combine(Updates.max("maxScore", s2), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-                }
+                // SYNC TO SOLO LEADERBOARD as well
+                val soloColl = database.getCollection<Document>("solo_leaderboard")
+                soloColl.updateOne(Filters.eq("name", p1), Updates.combine(Updates.max("maxScore", s1), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
+                soloColl.updateOne(Filters.eq("name", p2), Updates.combine(Updates.max("maxScore", s2), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
                 
                 val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
                 onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
