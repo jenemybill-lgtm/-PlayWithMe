@@ -22,8 +22,8 @@ import redis.clients.jedis.JedisPool
 import redis.clients.jedis.JedisPoolConfig
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "3.4.1"
-const val LATEST_VERSION_CODE = 26
+const val LATEST_VERSION_NAME = "3.4.2"
+const val LATEST_VERSION_CODE = 27
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 val REDIS_URL = System.getenv("REDIS_URL") ?: "redis://localhost:6379"
@@ -933,7 +933,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "${limitType}_LIMIT_REACHED"))))
                 return
             }
-            recordChallenge(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isSolo)
+            recordChallenge(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isBlitz)
 
             val parts = msg.content?.split("|")
             val seedValue = if (parts != null && parts.size >= 2 && parts[0] == "SEED") parts[1] else null
