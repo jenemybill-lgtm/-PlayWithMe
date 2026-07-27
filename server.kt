@@ -2055,7 +2055,7 @@ suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, i
 
     val field = if (isBlitz) "blitz_bonus" else if (isSolo) "solo_bonus" else "bonus_charges"
     val timestampField = if (isBlitz) "blitz_timestamps" else if (isSolo) "solo_timestamps" else "timestamps"
-    val maxLimit = if (isBlitz) 5 else if (isSolo) 10 else 3
+    val maxLimit = if (isBlitz) 10 else if (isSolo) 20 else 5
 
     val bonus = doc.getInteger(field) ?: 0
     if (bonus > 0) return null
