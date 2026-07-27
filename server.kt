@@ -595,8 +595,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             // Sync both
             sendRequestList(user, session)
-            val officialTarget = canonicalName(usersColl, requester)
-            onlineUsers[officialTarget]?.let { sendRequestList(officialTarget, it) }
+            onlineUsers[requester]?.let { sendRequestList(requester, it) }
         }
 
         MessageType.REMOVE_FRIEND -> {
@@ -933,7 +932,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "${limitType}_LIMIT_REACHED"))))
                 return
             }
-            recordChallenge(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isBlitz)
+            recordChallenge(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isSolo)
 
             val parts = msg.content?.split("|")
             val seedValue = if (parts != null && parts.size >= 2 && parts[0] == "SEED") parts[1] else null
@@ -1216,7 +1215,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val targetRaw = parts.getOrNull(0) ?: return
             val modeStr = parts.getOrNull(1) ?: "LIVE"
             val isLive = modeStr == "LIVE"
-            val gameType = parts.getOrNull(2) ?: "TRIVIA" // Corrected index for 2-pipe format from FriendsActivity
+            val gameType = parts.getOrNull(2) ?: "TRIVIA"
 
             if (targetRaw == "RANDOM") {
                 if (isLive) {
@@ -1228,7 +1227,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             if (opponentName != null && opponentName != host && onlineUsers.containsKey(opponentName)) {
                                 val opponentSession = onlineUsers[opponentName]
                                 
-                                // Pair them!
                                 val duelId = "DUEL_${gameType}_${System.currentTimeMillis()}"
                                 val duelDoc = Document("_id", duelId)
                                     .append("player1", host)
@@ -1248,7 +1246,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                                 session.send(Frame.Text(setupMsg))
                                 opponentSession?.send(Frame.Text(setupMsg))
                             } else {
-                                // Add to queue
                                 r.rpush(queueKey, host)
                                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αναμονή για αντίπαλο ($gameType)..."))))
                             }
@@ -1322,6 +1319,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
                     }
                 }
+                // If NOT live (Async), we don't notify target yet! They get notified after p1 finishes.
             }
         }
 
@@ -1683,44 +1681,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
         
         MessageType.DUEL_HISTORY_REQUEST -> {
-            val official = canonicalName(usersColl, msg.sender.trim())
-            val modeFilter = msg.content // specific mode like "XERI", "UNO", "CHESS", "SOLO_TRIVIA"
-
-            val filter = if (!modeFilter.isNullOrBlank() && modeFilter != "ALL") {
-                Filters.and(
-                    Filters.or(Filters.eq("player1", official), Filters.eq("player2", official)),
-                    Filters.eq("gameType", modeFilter)
-                )
-            } else {
-                Filters.or(Filters.eq("player1", official), Filters.eq("player2", official))
-            }
-
-            val history = historyColl.find(filter)
-                .sort(Sorts.descending("timestamp"))
-                .limit(50)
-                .toList()
-
-            // Calculate specific stats for this mode
-            val wins = history.count { it.getString("winner") == official }
-            val losses = history.count { it.getString("winner") != official && it.getString("winner") != "" }
-            val draws = history.count { it.getString("winner") == "" }
-
-            val response = mapOf(
-                "stats" to mapOf("wins" to wins, "losses" to losses, "draws" to draws),
-                "history" to history
-            )
-            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_HISTORY_DATA, "Server", gson.toJson(response)))))
-        }
-
-        MessageType.PVE_RESULT -> {
-            val user = canonicalName(usersColl, msg.sender.trim())
-            val parts = msg.content?.split("|") ?: return
-            // Format: gameType|result(WIN/LOSS/DRAW)|difficulty
-            val gType = parts.getOrNull(0) ?: "UNKNOWN"
-            val res = parts.getOrNull(1) ?: "LOSS"
-            val diff = parts.getOrNull(2) ?: "Medium"
-
-            recordMatchHistory(database, user, "CPU", if (res == "WIN") user else "CPU", gType, diff)
+            val stats = duelStatsColl.find(Filters.eq("_id", msg.sender)).firstOrNull()
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_HISTORY_DATA, "Server", gson.toJson(stats ?: Document("_id", msg.sender).append("wins", 0).append("losses", 0).append("draws", 0))))))
         }
 
         else -> {}
@@ -1829,8 +1791,8 @@ suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
 
             val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
             val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))
-            onlineUsers[game.player1]?.send(Frame.Text(finalMsg))
-            onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
+            onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
+            onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
             cardGames.remove(gameId)
             return
         }
