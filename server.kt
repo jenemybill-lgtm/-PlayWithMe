@@ -477,6 +477,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             sendFriendList(official, session)
             sendRequestList(official, session)
             notifyFriendsStatus(official, true)
+
+            // Push fresh stats on login
+            val stats = calculateStats(usageColl, official)
+            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PLAYER_STATS, "Server", gson.toJson(stats)))))
         }
 
         MessageType.ADD_FRIEND -> {
