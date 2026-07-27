@@ -2055,7 +2055,7 @@ suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, i
 
     val field = if (isBlitz) "blitz_bonus" else if (isSolo) "solo_bonus" else "bonus_charges"
     val timestampField = if (isBlitz) "blitz_timestamps" else if (isSolo) "solo_timestamps" else "timestamps"
-    val maxLimit = if (isBlitz) 10 else if (isSolo) 20 else 5
+    val maxLimit = if (isBlitz) 20 else if (isSolo) 50 else 10
 
     val bonus = doc.getInteger(field) ?: 0
     if (bonus > 0) return null
@@ -2063,7 +2063,12 @@ suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, i
     val timestamps = doc.getList(timestampField, Long::class.javaObjectType) ?: emptyList()
     val recent = timestamps.filter { it > dayAgo }
 
-    if (recent.size >= maxLimit) return "LIMIT_REACHED"
+    println("DEBUG LIMITS: User $user Mode(B=$isBlitz, S=$isSolo) Recent=${recent.size} Max=$maxLimit Bonus=$bonus")
+
+    if (recent.size >= maxLimit) {
+        println("DEBUG LIMITS: User $user BLOCKED")
+        return "LIMIT_REACHED"
+    }
     return null
 }
 
