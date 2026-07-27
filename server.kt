@@ -186,6 +186,100 @@ fun broadcastCardState(gameId: String, game: XeriGameState) {
     onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", stateJson)))) } }
 }
 
+// --- AGONIA ---
+data class AgoniaGameState(
+    val player1: String,
+    val player2: String,
+    val p1Hand: MutableList<Card> = mutableListOf(),
+    val p2Hand: MutableList<Card> = mutableListOf(),
+    val discardPile: MutableList<Card> = mutableListOf(),
+    val deck: MutableList<Card> = mutableListOf(),
+    var turn: String = "",
+    var currentSuit: String = "",
+    var currentValue: String = "",
+    var status: String = "ACTIVE"
+)
+val agoniaGames = ConcurrentHashMap<String, AgoniaGameState>()
+
+fun broadcastAgoniaState(gameId: String, game: AgoniaGameState) {
+    val stateJson = gson.toJson(game)
+    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "AGONIA|$stateJson")))) } }
+    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "AGONIA|$stateJson")))) } }
+}
+
+// --- DILOTI ---
+data class DeclarationGroup(val cards: List<Card>, val value: Int, val owner: String)
+data class DilotiGameState(
+    val player1: String,
+    val player2: String,
+    val p1Hand: MutableList<Card> = mutableListOf(),
+    val p2Hand: MutableList<Card> = mutableListOf(),
+    val tableFree: MutableList<Card> = mutableListOf(),
+    val declarations: MutableList<DeclarationGroup> = mutableListOf(),
+    val deck: MutableList<Card> = mutableListOf(),
+    var turn: String = "",
+    var p1Points: Int = 0,
+    var p2Points: Int = 0,
+    var p1CardsTaken: Int = 0,
+    var p2CardsTaken: Int = 0,
+    var p1XeriCount: Int = 0,
+    var p2XeriCount: Int = 0,
+    var lastToTake: String = "",
+    var status: String = "ACTIVE",
+    var lastPlayedCard: Card? = null
+)
+val dilotiGames = ConcurrentHashMap<String, DilotiGameState>()
+
+fun broadcastDilotiState(gameId: String, game: DilotiGameState) {
+    val stateJson = gson.toJson(game)
+    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "DILOTI|$stateJson")))) } }
+    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "DILOTI|$stateJson")))) } }
+}
+
+fun dilotiNextTurn(gameId: String, game: DilotiGameState) {
+    if (game.p1Hand.isEmpty() && game.p2Hand.isEmpty()) {
+        if (game.deck.isNotEmpty()) {
+            repeat(6) { if (game.deck.isNotEmpty()) game.p1Hand.add(game.deck.removeAt(0)) }
+            repeat(6) { if (game.deck.isNotEmpty()) game.p2Hand.add(game.deck.removeAt(0)) }
+        } else {
+            game.status = "FINISHED"
+            val remaining = game.tableFree + game.declarations.flatMap { it.cards }
+            val pts = remaining.sumOf { calculateCardPoints(it) }
+            if (game.lastToTake == game.player1) { game.p1Points += pts; game.p1CardsTaken += remaining.size }
+            else { game.p2Points += pts; game.p2CardsTaken += remaining.size }
+            if (game.p1CardsTaken > game.p2CardsTaken) game.p1Points += 3 else if (game.p2CardsTaken > game.p1CardsTaken) game.p2Points += 3
+            val winner = if (game.p1Points > game.p2Points) game.player1 else if (game.p2Points > game.p1Points) game.player2 else ""
+            CoroutineScope(Dispatchers.IO).launch {
+                updateDuelStats(database.getCollection("duel_stats"), game.player1, game.player2, winner)
+                recordMatchHistory(database, game.player1, game.player2, winner, "DILOTI")
+            }
+            val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"))
+            onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
+            onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
+            dilotiGames.remove(gameId); return
+        }
+    }
+    game.turn = if (game.turn == game.player1) game.player2 else game.player1
+}
+
+// --- BOARD GAMES ---
+data class BoardGameState(
+    val player1: String,
+    val player2: String,
+    var gameType: String, // CHESS, BACKGAMMON, CHECKERS
+    var turn: String = "",
+    var boardJson: String = "", // Game-specific JSON
+    var status: String = "ACTIVE",
+    var lastMove: String = ""
+)
+val boardGames = ConcurrentHashMap<String, BoardGameState>()
+
+fun broadcastBoardState(gameId: String, game: BoardGameState) {
+    val text = gson.toJson(GameMessage(MessageType.BOARD_GAME_STATE, "Server", gson.toJson(game)))
+    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(text)) } }
+    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(text)) } }
+}
+
 val onlineUsers = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
 val duelMatchmakingQueue = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
 val userLanguages = ConcurrentHashMap<String, String>() // Track preferred language for each user
@@ -1434,27 +1528,26 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     }
                 }
             } else if (gameType == "BACKGAMMON") {
-                // BACKGAMMON (Always LIVE for now)
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
                     val p1 = updated.getString("player1") ?: ""
                     val p2 = updated.getString("player2") ?: ""
-
-                    // Initial Board for Portes (example setup)
-                    val initialBoard = MutableList(24) { 0 }
-                    // Simple setup: 2 on 24, 5 on 13, 3 on 8, 5 on 6 for P1 (+ve)
-                    // Symmetric for P2 (-ve)
-
-                    val backgammonMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "BACKGAMMON_START"))
-                    onlineUsers[p1]?.send(Frame.Text(backgammonMsg))
-                    onlineUsers[p2]?.send(Frame.Text(backgammonMsg))
+                    val gameState = BoardGameState(p1, p2, gameType, p1)
+                    boardGames[duelId] = gameState
+                    val startMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "${gameType}_START"))
+                    onlineUsers[p1]?.send(Frame.Text(startMsg))
+                    onlineUsers[p2]?.send(Frame.Text(startMsg))
+                    CoroutineScope(Dispatchers.Default).launch { delay(1000); broadcastBoardState(duelId, gameState) }
                 }
             } else if (gameType == "CHESS") {
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
                     val p1 = updated.getString("player1") ?: ""
                     val p2 = updated.getString("player2") ?: ""
-                    val chessStartMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "CHESS_START"))
-                    onlineUsers[p1]?.send(Frame.Text(chessStartMsg))
-                    onlineUsers[p2]?.send(Frame.Text(chessStartMsg))
+                    val gameState = BoardGameState(p1, p2, gameType, p1)
+                    boardGames[duelId] = gameState
+                    val startMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "${gameType}_START"))
+                    onlineUsers[p1]?.send(Frame.Text(startMsg))
+                    onlineUsers[p2]?.send(Frame.Text(startMsg))
+                    CoroutineScope(Dispatchers.Default).launch { delay(1000); broadcastBoardState(duelId, gameState) }
                 }
             } else if (gameType == "UNO") {
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
@@ -1498,92 +1591,236 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         broadcastUnoState(duelId, gameState)
                     }
                 }
+            } else if (gameType == "AGONIA") {
+                if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
+                    val p1 = updated.getString("player1") ?: ""
+                    val p2 = updated.getString("player2") ?: ""
+                    val deck = createDeck()
+                    val p1Hand = mutableListOf<Card>()
+                    val p2Hand = mutableListOf<Card>()
+                    repeat(7) { p1Hand.add(deck.removeAt(0)) }
+                    repeat(7) { p2Hand.add(deck.removeAt(0)) }
+                    val first = deck.removeAt(0)
+                    val gameState = AgoniaGameState(p1, p2, p1Hand, p2Hand, mutableListOf(first), deck, p1, first.suit, first.rank)
+                    agoniaGames[duelId] = gameState
+                    val startMsg = gson.toJson(GameMessage(MessageType.CARD_GAME_MOVE, "Server", "AGONIA_START"))
+                    onlineUsers[p1]?.send(Frame.Text(startMsg))
+                    onlineUsers[p2]?.send(Frame.Text(startMsg))
+                    CoroutineScope(Dispatchers.Default).launch { delay(1000); broadcastAgoniaState(duelId, gameState) }
+                }
+            } else if (gameType == "DILOTI") {
+                if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
+                    val p1 = updated.getString("player1") ?: ""
+                    val p2 = updated.getString("player2") ?: ""
+                    val deck = createDeck()
+                    val p1Hand = mutableListOf<Card>()
+                    val p2Hand = mutableListOf<Card>()
+                    val table = mutableListOf<Card>()
+                    repeat(6) { p1Hand.add(deck.removeAt(0)) }
+                    repeat(6) { p2Hand.add(deck.removeAt(0)) }
+                    repeat(4) { table.add(deck.removeAt(0)) }
+                    val gameState = DilotiGameState(p1, p2, p1Hand, p2Hand, table, mutableListOf(), deck, p1)
+                    dilotiGames[duelId] = gameState
+                    val startMsg = gson.toJson(GameMessage(MessageType.CARD_GAME_MOVE, "Server", "DILOTI_START"))
+                    onlineUsers[p1]?.send(Frame.Text(startMsg))
+                    onlineUsers[p2]?.send(Frame.Text(startMsg))
+                    CoroutineScope(Dispatchers.Default).launch { delay(1000); broadcastDilotiState(duelId, gameState) }
+                }
+            } else if (gameType == "CHECKERS") {
+                if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
+                    val p1 = updated.getString("player1") ?: ""
+                    val p2 = updated.getString("player2") ?: ""
+                    val gameState = BoardGameState(p1, p2, gameType, p1)
+                    boardGames[duelId] = gameState
+                    val startMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "${gameType}_START"))
+                    onlineUsers[p1]?.send(Frame.Text(startMsg))
+                    onlineUsers[p2]?.send(Frame.Text(startMsg))
+                    CoroutineScope(Dispatchers.Default).launch { delay(1000); broadcastBoardState(duelId, gameState) }
+                }
             }
+        }
+
+        MessageType.BOARD_GAME_MOVE -> {
+            val content = msg.content ?: return
+            val parts = content.split("|")
+            val duelId = parts[0]
+            val moveType = parts.getOrNull(1) ?: "MOVE"
+            
+            val game = boardGames[duelId] ?: return
+            if (game.status == "FINISHED" || game.turn != msg.sender) return
+
+            if (moveType == "MOVE") {
+                game.boardJson = parts.getOrNull(2) ?: ""
+                game.lastMove = content.substringAfter("|MOVE|").substringAfter("|") // Take everything after boardJson
+                game.turn = if (msg.sender == game.player1) game.player2 else game.player1
+            } else if (moveType == "WIN") {
+                game.status = "FINISHED"
+                val winner = msg.sender
+                updateDuelStats(duelStatsColl, game.player1, game.player2, winner)
+                recordMatchHistory(database, game.player1, game.player2, winner, game.gameType)
+                val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", "ΝΙΚΗΤΗΣ: $winner!"))
+                onlineUsers[game.player1]?.send(Frame.Text(finalMsg))
+                onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
+            }
+            broadcastBoardState(duelId, game)
         }
 
         MessageType.CARD_GAME_MOVE -> {
             val sender = msg.sender
             val content = msg.content ?: return
-
-            // Format: DUEL_ID|MOVE_TYPE|CARD_ID|CHOSEN_COLOR
             val parts = content.split("|")
             val duelId = parts.getOrNull(0) ?: return
-            val moveType = parts.getOrNull(1) ?: "PLAY" // PLAY, DRAW
+            val moveType = parts.getOrNull(1) ?: "PLAY"
 
-            // --- Handle XERI Logic First ---
+            // 1. XERI
             if (cardGames.containsKey(duelId)) {
-                handleXeriMove(duelId, sender, parts.getOrNull(1) ?: "") // parts[1] is CardID in Xeri
+                handleXeriMove(duelId, sender, parts.getOrNull(1) ?: "")
                 return
             }
 
-            // --- Handle UNO Logic ---
-            val game = unoGames[duelId] ?: return
-            if (game.status == "FINISHED") return
-            if (game.turn != sender) return
+            // 2. UNO
+            if (unoGames.containsKey(duelId)) {
+                val game = unoGames[duelId] ?: return
+                if (game.status == "FINISHED" || game.turn != sender) return
+                if (moveType == "DRAW") {
+                    val hand = if (sender == game.player1) game.p1Hand else game.p2Hand
+                    if (game.drawDeck.isEmpty()) {
+                        val lastCard = game.discardPile.removeAt(game.discardPile.size - 1)
+                        game.drawDeck.addAll(game.discardPile.shuffled())
+                        game.discardPile.clear()
+                        game.discardPile.add(lastCard)
+                    }
+                    if (game.drawDeck.isNotEmpty()) hand.add(game.drawDeck.removeAt(0))
+                    game.turn = if (sender == game.player1) game.player2 else game.player1
+                } else {
+                    val cardId = parts.getOrNull(2) ?: return
+                    val hand = if (sender == game.player1) game.p1Hand else game.p2Hand
+                    val card = hand.find { it.id == cardId } ?: return
+                    val canPlay = card.color == "WILD" || card.color == game.currentSuit || card.value == game.currentValue
+                    if (!canPlay) return
+                    hand.remove(card)
+                    game.discardPile.add(card)
+                    game.currentSuit = if (card.color == "WILD") parts.getOrNull(3) ?: "RED" else card.color
+                    game.currentValue = card.value
+                    var skipNext = false
+                    when (card.value) {
+                        "SKIP", "REVERSE" -> skipNext = true
+                        "DRAW2" -> {
+                            val target = if (sender == game.player1) game.p2Hand else game.p1Hand
+                            repeat(2) { if (game.drawDeck.isNotEmpty()) target.add(game.drawDeck.removeAt(0)) }
+                            skipNext = true
+                        }
+                        "DRAW4" -> {
+                            val target = if (sender == game.player1) game.p2Hand else game.p1Hand
+                            repeat(4) { if (game.drawDeck.isNotEmpty()) target.add(game.drawDeck.removeAt(0)) }
+                            skipNext = true
+                        }
+                    }
+                    if (!skipNext) game.turn = if (sender == game.player1) game.player2 else game.player1
+                    if (hand.isEmpty()) {
+                        game.status = "FINISHED"
+                        val winner = sender
+                        updateDuelStats(duelStatsColl, game.player1, game.player2, winner)
+                        recordMatchHistory(database, game.player1, game.player2, winner, "UNO")
+                        val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", "UNO! ΝΙΚΗΤΗΣ: $winner!"))
+                        onlineUsers[game.player1]?.send(Frame.Text(finalMsg)); onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
+                        unoGames.remove(duelId); return
+                    }
+                }
+                broadcastUnoState(duelId, game); return
+            }
 
-            if (moveType == "DRAW") {
+            // 3. AGONIA
+            if (agoniaGames.containsKey(duelId)) {
+                val game = agoniaGames[duelId] ?: return
+                if (game.status == "FINISHED" || game.turn != sender) return
+                if (moveType == "DRAW") {
+                    val hand = if (sender == game.player1) game.p1Hand else game.p2Hand
+                    if (game.deck.isNotEmpty()) hand.add(game.deck.removeAt(0))
+                    game.turn = if (sender == game.player1) game.player2 else game.player1
+                } else {
+                    val cardId = parts.getOrNull(2) ?: return
+                    val hand = if (sender == game.player1) game.p1Hand else game.p2Hand
+                    val card = hand.find { it.id == cardId } ?: return
+                    if (card.rank != "A" && card.suit != game.currentSuit && card.rank != game.currentValue) return
+                    hand.remove(card)
+                    game.discardPile.add(card)
+                    game.currentSuit = if (card.rank == "A") parts.getOrNull(3) ?: "♠️" else card.suit
+                    game.currentValue = card.rank
+                    if (card.rank == "7") {
+                        val target = if (sender == game.player1) game.p2Hand else game.p1Hand
+                        repeat(2) { if (game.deck.isNotEmpty()) target.add(game.deck.removeAt(0)) }
+                    }
+                    if (card.rank != "8") game.turn = if (sender == game.player1) game.player2 else game.player1
+                    if (hand.isEmpty()) {
+                        game.status = "FINISHED"
+                        updateDuelStats(duelStatsColl, game.player1, game.player2, sender)
+                        recordMatchHistory(database, game.player1, game.player2, sender, "AGONIA")
+                        val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", "ΝΙΚΗΤΗΣ: $sender!"))
+                        onlineUsers[game.player1]?.send(Frame.Text(finalMsg)); onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
+                        agoniaGames.remove(duelId); return
+                    }
+                }
+                broadcastAgoniaState(duelId, game); return
+            }
+
+            // 4. DILOTI
+            if (dilotiGames.containsKey(duelId)) {
+                val game = dilotiGames[duelId] ?: return
+                if (game.status == "FINISHED" || game.turn != sender) return
                 val hand = if (sender == game.player1) game.p1Hand else game.p2Hand
-                if (game.drawDeck.isEmpty()) {
-                    val lastCard = game.discardPile.removeAt(game.discardPile.size - 1)
-                    game.drawDeck.addAll(game.discardPile.shuffled())
-                    game.discardPile.clear()
-                    game.discardPile.add(lastCard)
+                val cardId = parts.getOrNull(2) ?: return
+                val card = hand.find { it.id == cardId } ?: return
+
+                when (moveType) {
+                    "DISCARD" -> {
+                        hand.remove(card); game.tableFree.add(card)
+                        dilotiNextTurn(duelId, game)
+                    }
+                    "CAPTURE" -> {
+                        val tableIds = parts.getOrNull(3)?.split(",") ?: emptyList()
+                        val toCapture = mutableListOf<Card>()
+                        
+                        if (card.rank == "J") {
+                            toCapture.addAll(game.tableFree)
+                            game.declarations.forEach { d -> toCapture.addAll(it.cards) }
+                            game.tableFree.clear(); game.declarations.clear()
+                        } else {
+                            toCapture.addAll(game.tableFree.filter { tableIds.contains(it.id) })
+                            game.tableFree.removeAll(toCapture)
+                            val declVal = parts.getOrNull(4)?.toIntOrNull()
+                            val decl = if (declVal != null) game.declarations.find { it.value == declVal } else null
+                            if (decl != null) { toCapture.addAll(decl.cards); game.declarations.remove(decl) }
+                        }
+                        
+                        hand.remove(card)
+                        var points = calculateCardPoints(card) + toCapture.sumOf { calculateCardPoints(it) }
+                        val isXeri = (game.tableFree.size + game.declarations.size) == 0 && toCapture.size == 1 && toCapture[0].rank == card.rank && card.rank != "J"
+                        if (isXeri) points += if (card.rank == "A") 20 else 10
+                        if (sender == game.player1) { game.p1Points += points; game.p1CardsTaken += toCapture.size + 1; if (isXeri) game.p1XeriCount++ }
+                        else { game.p2Points += points; game.p2CardsTaken += toCapture.size + 1; if (isXeri) game.p2XeriCount++ }
+                        game.lastToTake = sender
+                        dilotiNextTurn(duelId, game)
+                    }
+                    "DECLARE" -> {
+                        val targetId = parts.getOrNull(3) ?: return
+                        val target = game.tableFree.find { it.id == targetId } ?: return
+                        val value = parts.getOrNull(4)?.toIntOrNull() ?: return
+                        hand.remove(card); game.tableFree.remove(target)
+                        game.declarations.add(DeclarationGroup(listOf(card, target), value, sender))
+                        dilotiNextTurn(duelId, game)
+                    }
+                    "INCREASE" -> {
+                        val targetVal = parts.getOrNull(3)?.toIntOrNull() ?: return
+                        val target = game.declarations.find { it.value == targetVal } ?: return
+                        val newVal = parts.getOrNull(4)?.toIntOrNull() ?: return
+                        hand.remove(card); game.declarations.remove(target)
+                        game.declarations.add(DeclarationGroup(target.cards + card, newVal, sender))
+                        dilotiNextTurn(duelId, game)
+                    }
                 }
-                if (game.drawDeck.isNotEmpty()) {
-                    hand.add(game.drawDeck.removeAt(0))
-                }
-                game.turn = if (sender == game.player1) game.player2 else game.player1
-                broadcastUnoState(duelId, game)
-                return
-            }
-
-            val cardId = parts.getOrNull(2) ?: return
-            val hand = if (sender == game.player1) game.p1Hand else game.p2Hand
-            val card = hand.find { it.id == cardId } ?: return
-
-            // Check if play is valid
-            val canPlay = card.color == "WILD" || card.color == game.currentSuit || card.value == game.currentValue
-            if (!canPlay) return
-
-            // 1. Play card
-            hand.remove(card)
-            game.discardPile.add(card)
-            game.currentSuit = if (card.color == "WILD") parts.getOrNull(3) ?: "RED" else card.color
-            game.currentValue = card.value
-
-            // 2. Action logic
-            var skipNext = false
-            when (card.value) {
-                "SKIP" -> skipNext = true
-                "REVERSE" -> skipNext = true // In 2 player, reverse acts like skip
-                "DRAW2" -> {
-                    val targetHand = if (sender == game.player1) game.p2Hand else game.p1Hand
-                    repeat(2) { if (game.drawDeck.isNotEmpty()) targetHand.add(game.drawDeck.removeAt(0)) }
-                    skipNext = true
-                }
-                "DRAW4" -> {
-                    val targetHand = if (sender == game.player1) game.p2Hand else game.p1Hand
-                    repeat(4) { if (game.drawDeck.isNotEmpty()) targetHand.add(game.drawDeck.removeAt(0)) }
-                    skipNext = true
-                }
-            }
-
-            // 3. Switch turn
-            if (!skipNext) {
-                game.turn = if (sender == game.player1) game.player2 else game.player1
-            }
-
-            // 4. Win condition
-            if (hand.isEmpty()) {
-                game.status = "FINISHED"
-                val resultMsg = "UNO! Νικητής: $sender"
-                updateDuelStats(duelStatsColl, game.player1, game.player2, sender)
-                val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))
-                onlineUsers[game.player1]?.send(Frame.Text(finalMsg))
-                onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
-                unoGames.remove(duelId)
-            } else {
-                broadcastUnoState(duelId, game)
+                game.lastPlayedCard = card
+                broadcastDilotiState(duelId, game); return
             }
         }
 
@@ -1732,7 +1969,7 @@ suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
 
             // Xeri detection
             if (game.table.size == 1 && card.rank == top.rank) {
-                points += if (card.rank == "J") 20 else 10
+                points += if (card.rank == "A") 20 else 10
             }
 
             if (player == game.player1) {
