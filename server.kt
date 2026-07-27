@@ -1099,18 +1099,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
                 } else {
                     val pending = database.getCollection<Document>("suggested_questions")
-                        .find().toList() // Correctly fetch all pending for moderation
-
-                    // Add Category Counts for Correlation
+                        .find().toList()
+                    
                     val stats = mutableMapOf<String, Int>()
                     ALL_CATEGORIES.forEach { cat ->
                         stats[cat] = getQuestionsCollection(cat).countDocuments().toInt()
                     }
-
+                    
                     val response = mapOf(
                         "questions" to pending,
                         "stats" to stats
                     )
+                    
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
+                }
 
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
                 }
