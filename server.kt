@@ -1113,9 +1113,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
                 }
-
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
-                }
             } else if (msg.content == "CHALLENGES") {
                 // Non-admin can also see their own challenges
                 val challenges = database.getCollection<Document>("challenges")
