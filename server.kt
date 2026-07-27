@@ -924,16 +924,16 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.GET_SOLO_QUESTIONS -> {
             // Check Solo/Blitz Limit
-            val isBlitz = msg.content?.startsWith("BLITZ") == true
-            val isSolo = !isBlitz
-            val limitType = if (isBlitz) "BLITZ" else "SOLO"
+            val isBlitzMode = msg.content?.startsWith("BLITZ") == true
+            val isSoloMode = !isBlitzMode
+            val limitType = if (isBlitzMode) "BLITZ" else "SOLO"
 
-            val limitError = checkChallengeLimit(usageColl, msg.sender, isBlitz = isBlitz, isSolo = isSolo)
+            val limitError = checkChallengeLimit(usageColl, msg.sender, isBlitz = isBlitzMode, isSolo = isSoloMode)
             if (limitError != null) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "${limitType}_LIMIT_REACHED"))))
                 return
             }
-            recordChallenge(usageColl, msg.sender, isBlitz = isBlitz, isSolo = isSolo)
+            recordChallenge(usageColl, msg.sender, isBlitz = isBlitzMode, isSolo = isSoloMode)
 
             val parts = msg.content?.split("|")
             val seedValue = if (parts != null && parts.size >= 2 && parts[0] == "SEED") parts[1] else null
