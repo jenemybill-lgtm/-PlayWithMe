@@ -119,7 +119,7 @@ fun createUnoDeck(): MutableList<UnoCard> {
     val colors = listOf("RED", "BLUE", "GREEN", "YELLOW")
     val values = (0..9).map { it.toString() } + listOf("SKIP", "REVERSE", "DRAW2")
     val deck = mutableListOf<UnoCard>()
-    
+
     for (c in colors) {
         for (v in values) {
             deck.add(UnoCard(c, v, "${c}_${v}_1"))
@@ -262,10 +262,10 @@ suspend fun migrateToFinalGreekSchema() {
 
     collections.forEach { coll ->
         val questions = coll.find().toList()
-        
+
         questions.forEach { doc ->
             val updates = mutableListOf<org.bson.conversions.Bson>()
-            
+
             // 1. Simplify Text
             val textObj = doc.get("text")
             if (textObj is Document || textObj is Map<*, *>) {
@@ -279,7 +279,7 @@ suspend fun migrateToFinalGreekSchema() {
                 val optionsMap = if (optionsObj is Document) optionsObj else Document(optionsObj as Map<String, Any>)
                 updates.add(Updates.set("options", optionsMap.getList("el", String::class.java) ?: emptyList<String>()))
             }
-            
+
             // 3. Remove qid
             if (doc.containsKey("qid")) {
                 updates.add(Updates.unset("qid"))
@@ -294,13 +294,13 @@ suspend fun migrateToFinalGreekSchema() {
             }
         }
     }
-    
+
     metaColl.updateOne(
-        Filters.eq("_id", "schema_version"), 
-        Updates.combine(Updates.set("version", TARGET_VERSION), Updates.setOnInsert("_id", "schema_version")), 
+        Filters.eq("_id", "schema_version"),
+        Updates.combine(Updates.set("version", TARGET_VERSION), Updates.setOnInsert("_id", "schema_version")),
         UpdateOptions().upsert(true)
     )
-    
+
     println("SERVER MIGRATION: Database simplified to Greek-only schema (v$TARGET_VERSION).")
 }
 
@@ -354,7 +354,7 @@ fun main() {
                     val room = entry.value
                     val isParticipant = room.players.any { it.session == this }
                     val isHost = room.hostSession == this
-                    
+
                     if (isParticipant || isHost) {
                         if (room.isGameRunning) {
                             room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποσυνδέθηκε."))
@@ -382,7 +382,7 @@ suspend fun canonicalName(usersColl: MongoCollection<Document>, raw: String): St
 fun getQuestionsCollection(category: String): MongoCollection<Document> {
     val sanitized = category.trim()
     val base = if (sanitized == "Όλες" || sanitized == "Όλα") {
-        "Γενικές Γνώσεις" 
+        "Γενικές Γνώσεις"
     } else {
         sanitized
     }
@@ -423,7 +423,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "EXISTS"))))
                 return
             }
-            
+
             val userDoc = Document("name", name).append("createdAt", Date())
             if (password.isNotEmpty()) {
                 userDoc.append("password", password)
@@ -452,7 +452,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
 
             onlineUsers[official] = session
-            
+
             // Check for Expired Duels (24h Auto-Win)
             checkAndExpireDuels(duelsColl, duelStatsColl, official)
 
@@ -462,10 +462,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             } catch (e: Exception) {
                 println("REDIS ERROR: Failed to mark $official online: ${e.message}")
             }
-            
+
             // Preferred language removed - Greek only
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "OK"))))
-            
+
             // Pending Messages
             pendingColl.find(Filters.eq("target", official)).toList().forEach { doc ->
                 val typeStr = doc.getString("type") ?: "ERROR"
@@ -489,7 +489,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 return
             }
             val officialTarget = targetDoc.getString("name") ?: targetRaw
-            
+
             if (user.equals(officialTarget, ignoreCase = true)) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν μπορείς να στείλεις αίτημα στον εαυτό σου!"))))
                 return
@@ -518,7 +518,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 friendsColl.updateOne(Filters.eq("_id", officialTarget), Updates.combine(Updates.addToSet("friends", user), Updates.setOnInsert("_id", officialTarget)), UpdateOptions().upsert(true))
 
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Τώρα είστε φίλοι με τον $officialTarget!"))))
-                
+
                 // Sync both players
                 sendFriendList(user, session)
                 sendRequestList(user, session)
@@ -540,7 +540,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 )
 
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Το αίτημα στάλθηκε!"))))
-                
+
                 // Sync both players
                 sendRequestList(user, session)
                 onlineUsers[officialTarget]?.let { sendRequestList(officialTarget, it) }
@@ -579,7 +579,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.REJECT_REQUEST -> {
             val user = canonicalName(usersColl, msg.sender.trim())
             val requester = msg.content?.trim() ?: return
-            
+
             requestsColl.updateOne(Filters.eq("_id", user), Updates.pull("incoming", requester))
             requestsColl.updateOne(Filters.eq("_id", requester), Updates.pull("outgoing", user))
 
@@ -613,7 +613,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.RESET_CHALLENGE_LIMIT -> {
             val user = canonicalName(usersColl, msg.sender.trim())
             val mode = msg.content // "SOLO", "BLITZ", or "DUEL"
-            
+
             val updates = mutableListOf<org.bson.conversions.Bson>()
             when (mode) {
                 "SOLO" -> {
@@ -639,12 +639,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 }
             }
             updates.add(Updates.setOnInsert("_id", user))
-            
+
             usageColl.updateOne(Filters.eq("_id", user), Updates.combine(updates), UpdateOptions().upsert(true))
-            
+
             // Send back success and then send fresh stats
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "LIMIT_RESET_OK"))))
-            
+
             // Immediately trigger stats update to all listeners
             val stats = calculateStats(usageColl, user)
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PLAYER_STATS, "Server", gson.toJson(stats)))))
@@ -678,19 +678,19 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.CHALLENGE_FRIEND -> {
             val host = canonicalName(usersColl, msg.sender.trim())
             val rawContent = msg.content ?: return
-            
+
             val challengesColl = database.getCollection<Document>("challenges")
-            
+
             if (rawContent.startsWith("RANDOM|")) {
                 // Random opponent from USERS
                 val allUsersExceptMe = usersColl.find(Filters.ne("name", host)).toList()
                 val target = allUsersExceptMe.shuffled().firstOrNull()?.getString("name")
-                
+
                 if (target != null) {
                     val catsStr = rawContent.substringAfter("RANDOM|")
                     val cats = catsStr.split(",")
                     val questions = fetchQuestions(10, cats, listOf("Όλα"))
-                    
+
                     val now = System.currentTimeMillis()
                     val challengeId = "CHAL_${now}_${(1000..9999).random()}"
                     val chalDoc = Document("_id", challengeId)
@@ -701,9 +701,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         .append("questions", questions)
                         .append("timestamp", now)
                         .append("status", "SENDER_WAITING")
-                    
+
                     challengesColl.insertOne(chalDoc)
-                    
+
                     val setupStr = "$challengeId|$target|${gson.toJson(questions)}"
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_SETUP, "Server", setupStr))))
                 } else {
@@ -713,10 +713,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 // Friends Solo Challenge
                 val parts = rawContent.split("|")
                 val target = canonicalName(usersColl, parts.getOrNull(1) ?: return)
-                
+
                 // Fetch 10 questions for the challenge
                 val questions = fetchQuestions(10, listOf("Όλες"), listOf("Όλα"))
-                
+
                 // Let sender play first!
                 val now = System.currentTimeMillis()
                 val challengeId = "SOLO_FRIEND_${now}"
@@ -727,9 +727,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     .append("questions", questions)
                     .append("timestamp", now)
                     .append("status", "SENDER_WAITING")
-                
+
                 challengesColl.insertOne(chalDoc)
-                
+
                 // Inform sender to start playing
                 val setupStr = "$challengeId|$target|${gson.toJson(questions)}"
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.CHALLENGE_SETUP, "Server", setupStr))))
@@ -763,14 +763,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val count = (setup["count"] as? Double)?.toInt() ?: 10
                 val categories = setup["categories"] as? List<String> ?: listOf("Όλες")
                 val difficulties = setup["difficulties"] as? List<String> ?: listOf("Όλα")
-                
+
                 // --- ALWAYS FETCH FROM DB (Greek Only) ---
                 val fetchedQuestions = fetchQuestions(count, categories, difficulties)
                 if (fetchedQuestions.isEmpty()) {
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν βρέθηκαν ερωτήσεις για αυτά τα φίλτρα!"))))
                     return
                 }
-                
+
                 room.questions = fetchedQuestions
                 room.timerSeconds = (setup["timer"] as? Double)?.toInt() ?: 20
                 room.isSuddenDeathEnabled = setup["isSuddenDeath"] as? Boolean ?: true
@@ -779,14 +779,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 room.isGameRunning = true
                 room.currentQuestionIndex = 0
 
-                room.players.forEach { 
+                room.players.forEach {
                     it.score = 0; it.correctCount = 0; it.wrongCount = 0; it.totalTime = 0; it.isEliminated = false
                 }
 
                 room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
-                room.gameJob = CoroutineScope(Dispatchers.Default).launch { 
+                room.gameJob = CoroutineScope(Dispatchers.Default).launch {
                     delay(3000) // Give clients time to transition
-                    runGameLoop(room) 
+                    runGameLoop(room)
                 }
             }
         }
@@ -796,7 +796,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val player = room?.players?.find { it.session == session }
             if (room != null && player != null) {
                 if (msg.content == "CLIENT_READY") {
-                    player.hasAnswered = true 
+                    player.hasAnswered = true
                     println("SERVER: Structural Handshake -> Player ${player.name} is READY.")
                     return
                 }
@@ -827,14 +827,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             try {
                 val listType = object : TypeToken<List<Map<String, Any>>>() {}.type
                 val newQuestions: List<Map<String, Any>> = gson.fromJson(msg.content, listType)
-                
+
                 // 1. Reset: Delete all categorized collections and suggested_questions
                 ALL_CATEGORIES.forEach { cat ->
                     val coll = getQuestionsCollection(cat)
                     runBlocking { coll.deleteMany(Document()) }
                 }
                 runBlocking { database.getCollection<Document>("suggested_questions").deleteMany(Document()) }
-                
+
                 // 2. Delete the legacy "local" folder (if it refers to a collection named "local")
                 try {
                     runBlocking { database.getCollection<Document>("local").drop() }
@@ -843,7 +843,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 var added = 0
                 // Group questions by category for batch insertion
                 val groupedByCat = newQuestions.filter { it.containsKey("text") }.groupBy { it["category"]?.toString() ?: "Άλλα" }
-                
+
                 groupedByCat.forEach { (category, questions) ->
                     val coll = getQuestionsCollection(category)
                     val toInsert = questions.map { q ->
@@ -854,13 +854,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             .append("difficulty", q["difficulty"]?.toString() ?: "Μέτριο")
                             .append("isApproved", true)
                     }
-                    
+
                     if (toInsert.isNotEmpty()) {
                         runBlocking { coll.insertMany(toInsert) }
                         added += toInsert.size
                     }
                 }
-                
+
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η βάση δεδομένων αντικαταστάθηκε επιτυχώς με $added ερωτήσεις!"))))
                 println("SERVER: DATABASE RESET AND OVERWRITTEN by ${msg.sender} -> Total: $added")
             } catch (e: Exception) {
@@ -874,7 +874,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             try {
                 val lastSync = msg.content?.toLongOrNull() ?: 0L
                 val newQuestions = mutableListOf<Document>()
-                
+
                 for (cat in ALL_CATEGORIES) {
                     val fromCat = getQuestionsCollection(cat).find(Filters.gt("approvedAt", Date(lastSync))).toList()
                     newQuestions.addAll(fromCat)
@@ -900,7 +900,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val suggestion = Document.parse(msg.content)
                 val questionText = suggestion.getString("text") ?: ""
                 val options = suggestion.get("options", List::class.java) as? List<*> ?: emptyList<Any>()
-                
+
                 if (questionText.length < 10 || questionText.length > 200) {
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση πρέπει να είναι 10-200 χαρακτήρες."))))
                     return
@@ -926,7 +926,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             // Check Solo/Blitz Limit
             val isBlitz = msg.content?.startsWith("BLITZ") == true
             val limitType = if (isBlitz) "BLITZ" else "SOLO"
-            
+
             val limitError = checkChallengeLimit(usageColl, msg.sender, isBlitz = isBlitz, isSolo = !isBlitz)
             if (limitError != null) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "${limitType}_LIMIT_REACHED"))))
@@ -936,22 +936,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             val parts = msg.content?.split("|")
             val seedValue = if (parts != null && parts.size >= 2 && parts[0] == "SEED") parts[1] else null
-            
+
             val allSoloQuestions = mutableListOf<Document>()
             val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
-            
+
             diffCounts.forEach { (diff, targetCount) ->
                 val collected = mutableListOf<Document>()
                 val shuffledCats = ALL_CATEGORIES.shuffled(if (seedValue != null) Random(seedValue.hashCode().toLong()) else Random())
-                
+
                 for (cat in shuffledCats) {
                     if (collected.size >= targetCount) break
-                    val fromCat = runBlocking { 
+                    val fromCat = runBlocking {
                         getQuestionsCollection(cat).find(Filters.eq("difficulty", diff)).toList()
                     }
                     collected.addAll(fromCat)
                 }
-                
+
                 val pool = collected.distinctBy { it.getString("text") }
                 if (seedValue != null) {
                     allSoloQuestions.addAll(pool.shuffled(Random(seedValue.hashCode().toLong() + diff.hashCode())).take(targetCount))
@@ -959,7 +959,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     allSoloQuestions.addAll(pool.shuffled().take(targetCount))
                 }
             }
-            
+
             // Final check - if STILL empty (DB is empty), we must notify
             if (allSoloQuestions.isEmpty()) {
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν βρέθηκαν ερωτήσεις στη βάση δεδομένων!"))))
@@ -973,7 +973,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val sender = msg.sender
             val parts = msg.content?.split("|") ?: return
             val chalId = parts.getOrNull(0) ?: return
-            
+
             // Format: CHAL_ID|score|time
             val score = parts.getOrNull(1)?.toIntOrNull() ?: 0
             val time = parts.getOrNull(2)?.toLongOrNull() ?: 0
@@ -993,13 +993,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 println("SERVER: Blitz Score Submitted for $sender -> $score")
                 return
             }
-            
+
             val challengesColl = database.getCollection<Document>("challenges")
             val chal = challengesColl.find(Filters.eq("_id", chalId)).firstOrNull() ?: return
-            
+
             val isSender = sender == chal.getString("sender")
             val isReceiver = sender == chal.getString("receiver")
-            
+
             if (isSender) {
                 // Sender finished their turn
                 challengesColl.updateOne(Filters.eq("_id", chalId), Updates.combine(
@@ -1007,11 +1007,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     Updates.set("sender_time", time),
                     Updates.set("status", "RECEIVER_WAITING")
                 ))
-                
+
                 // Notify Receiver
                 val target = chal.getString("receiver") ?: return
                 val type = chal.getString("type") ?: "RANDOM"
-                
+
                 if (type == "RANDOM") {
                     val cats = chal.getString("categories") ?: ""
                     val questions = chal.get("questions", List::class.java) as? List<Document> ?: emptyList()
@@ -1039,25 +1039,25 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val t1 = chal.getLong("sender_time") ?: 0L
                 val s2 = score
                 val t2 = time
-                
+
                 val p1 = chal.getString("sender") ?: ""
                 val p2 = sender
-                
+
                 var winner = ""
                 if (s1 > s2) winner = p1
                 else if (s2 > s1) winner = p2
                 else if (t1 < t2) winner = p1
                 else if (t2 < t1) winner = p2
-                
+
                 // 1. Update Global Stats
                 updateDuelStats(duelStatsColl, p1, p2, winner)
                 recordMatchHistory(database, p1, p2, winner, "TRIVIA", "Challenge")
-                
+
                 // 2. Notify Both
                 val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
                 onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Challenge Result: $resultMsg"))))
                 onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Challenge Result: $resultMsg"))))
-                
+
                 // 3. CLEANUP: Delete challenge
                 challengesColl.deleteOne(Filters.eq("_id", chalId))
                 println("SERVER: Challenge $chalId COMPLETED and DELETED.")
@@ -1068,23 +1068,23 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.GET_LEADERBOARD -> {
             val mode = msg.content ?: "SOLO"
             println("SERVER: Leaderboard request for mode: $mode")
-            
+
             val targetColl = when(mode) {
                 "BLITZ" -> database.getCollection<Document>("blitz_leaderboard")
                 "DUEL" -> database.getCollection<Document>("duel_stats")
                 else -> database.getCollection<Document>("solo_leaderboard")
             }
-            
+
             val sortField = if (mode == "DUEL") "wins" else "maxScore"
-            
+
             val top = targetColl.find().sort(Sorts.descending(sortField)).limit(50).toList()
-                .map { 
+                .map {
                     if (mode == "DUEL") {
                         // DuelStats uses _id as name
                         mapOf("name" to (it.getString("_id") ?: "Anon"), "score" to (it.getInteger("wins") ?: 0))
                     } else {
                         // Return raw maxScore (no multiplier)
-                        mapOf("name" to (it.getString("name") ?: "Anon"), "score" to (it.getInteger("maxScore") ?: 0)) 
+                        mapOf("name" to (it.getString("name") ?: "Anon"), "score" to (it.getInteger("maxScore") ?: 0))
                     }
                 }
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LEADERBOARD_DATA, "Server", gson.toJson(top)))))
@@ -1100,18 +1100,18 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 } else {
                     val pending = database.getCollection<Document>("suggested_questions")
                         .find().toList() // Correctly fetch all pending for moderation
-                    
+
                     // Add Category Counts for Correlation
                     val stats = mutableMapOf<String, Int>()
                     ALL_CATEGORIES.forEach { cat ->
                         stats[cat] = getQuestionsCollection(cat).countDocuments().toInt()
                     }
-                    
+
                     val response = mapOf(
                         "questions" to pending,
                         "stats" to stats
                     )
-                    
+
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
                 }
             } else if (msg.content == "CHALLENGES") {
@@ -1129,27 +1129,27 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     // Robust ID extraction: Look for a 24-character hex string anywhere in the content
                     val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
                     val cleanId = idMatch?.value
-                    
+
                     if (cleanId == null || cleanId.length != 24) {
                         println("SERVER ERROR: Failed to extract valid 24-char hex ID from: $rawContent")
                         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης (Format Error)."))))
                         return
                     }
-                    
+
                     val id = org.bson.types.ObjectId(cleanId)
                     val suggestionsColl = database.getCollection<Document>("suggested_questions")
-                    
+
                     // 1. Find the question in suggestions
                     val questionDoc = suggestionsColl.find(Filters.eq("_id", id)).firstOrNull()
-                    
+
                     if (questionDoc != null) {
                         val category = questionDoc.getString("category") ?: "Άλλα"
                         val targetColl = getQuestionsCollection(category)
-                        
+
                         // 2. Check for duplicate text in target category
                         val text = questionDoc.getString("text") ?: ""
                         val existing = targetColl.find(Filters.eq("text", text)).firstOrNull()
-                        
+
                         if (existing == null) {
                             // 3. Move to proper collection with approved flag and SIMPLIFIED schema
                             val approvedDoc = Document(questionDoc).apply {
@@ -1158,14 +1158,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                                 remove("ar")
                                 remove("en")
                                 remove("qid")
-                                
+
                                 // Simplify text if it's an object
                                 val textVal = get("text")
                                 if (textVal is Document || textVal is Map<*, *>) {
                                     val textMap = if (textVal is Document) textVal else Document(textVal as Map<String, Any>)
                                     append("text", textMap.getString("el") ?: "")
                                 }
-                                
+
                                 // Simplify options if it's an object
                                 val optVal = get("options")
                                 if (optVal is Document || optVal is Map<*, *>) {
@@ -1201,7 +1201,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         MessageType.DUEL_CHALLENGE -> {
             val host = canonicalName(usersColl, msg.sender.trim())
-            
+
             // Limit Check
             val limitError = checkChallengeLimit(usageColl, host)
             if (limitError != null) {
@@ -1226,7 +1226,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             val opponentName = r.lpop(queueKey)
                             if (opponentName != null && opponentName != host && onlineUsers.containsKey(opponentName)) {
                                 val opponentSession = onlineUsers[opponentName]
-                                
+
                                 val duelId = "DUEL_${gameType}_${System.currentTimeMillis()}"
                                 val duelDoc = Document("_id", duelId)
                                     .append("player1", host)
@@ -1238,7 +1238,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                                     .append("isRandom", true)
                                     .append("gameType", gameType)
                                     .append("createdAt", Date())
-                                
+
                                 duelsColl.insertOne(duelDoc)
 
                                 val setupStr = "$duelId|$host|$opponentName|false|$gameType"
@@ -1270,7 +1270,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                                 Updates.set("player2", host),
                                 Updates.set("p2_cats", parts.getOrNull(2) ?: "")
                             ))
-                            
+
                             val setupStr = "$duelId|$p1|$host|true|TRIVIA"
                             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
                         } else {
@@ -1304,7 +1304,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     .append("p1_ready", false)
                     .append("p2_ready", false)
                     .append("createdAt", Date())
-                
+
                 duelsColl.insertOne(duelDoc)
 
                 val responseStr = "$duelId|$host|$target|${!isLive}|$gameType"
@@ -1331,18 +1331,18 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.DUEL_ACCEPT -> {
             val acceptor = msg.sender
             val host = msg.content?.split("|")?.getOrNull(0) ?: return
-            
+
             // Find the pending duel
             val duel = duelsColl.find(Filters.and(
                 Filters.eq("player1", host),
                 Filters.eq("player2", acceptor),
                 Filters.eq("status", "SETUP")
             )).firstOrNull() ?: return
-            
+
             val duelId = duel.getString("_id")
             val isLive = duel.getBoolean("isLive") ?: false
             val gameType = duel.getString("gameType") ?: "TRIVIA"
-            
+
             val responseStr = "$duelId|$host|$acceptor|${!isLive}|$gameType"
             val setupMsg = gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))
             session.send(Frame.Text(setupMsg))
@@ -1354,15 +1354,15 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val parts = content.split("|")
             val duelId = parts.getOrNull(0) ?: return
             val player = msg.sender
-            
+
             val duel = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
             val gameType = duel.getString("gameType") ?: "TRIVIA"
-            
+
             val isP1 = player == duel.getString("player1")
             val updateField = if (isP1) "p1_ready" else "p2_ready"
-            
+
             val updates = mutableListOf(Updates.set(updateField, true))
-            
+
             if (gameType == "TRIVIA") {
                 updates.add(Updates.set(if (isP1) "p1_cats" else "p2_cats", parts.getOrNull(1) ?: ""))
                 if (parts.size >= 3 && parts[2].isNotBlank() && parts[2] != "null") {
@@ -1370,11 +1370,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     updates.add(Updates.set("questions", qList))
                 }
             }
-            
+
             duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(updates))
-            
+
             val updated = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
-            
+
             if (gameType == "TRIVIA") {
                 // Fetch or generate questions if not already there
                 var questions = updated.get("questions", List::class.java) as? List<Document>
@@ -1382,11 +1382,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     val cats1 = updated.getString("p1_cats")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
                     val cats2 = updated.getString("p2_cats")?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
                     val combinedCats = (cats1 + cats2).distinct()
-                    
+
                     questions = fetchQuestions(10, if (combinedCats.isEmpty()) listOf("Όλες") else combinedCats, listOf("Όλα"))
                     duelsColl.updateOne(Filters.eq("_id", duelId), Updates.set("questions", questions))
                 }
-                
+
                 val isLive = updated.getBoolean("isLive") ?: false
                 val gameSetup = mapOf("timer" to 20, "questions" to gson.toJson(questions))
                 val setupJson = gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(gameSetup)))
@@ -1406,16 +1406,16 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
                     val p1 = updated.getString("player1") ?: ""
                     val p2 = updated.getString("player2") ?: ""
-                    
+
                     val deck = createDeck()
                     val p1Hand = mutableListOf<Card>()
                     val p2Hand = mutableListOf<Card>()
                     val table = mutableListOf<Card>()
-                    
+
                     repeat(6) { p1Hand.add(deck.removeAt(0)) }
                     repeat(6) { p2Hand.add(deck.removeAt(0)) }
                     repeat(4) { table.add(deck.removeAt(0)) }
-                    
+
                     val gameState = XeriGameState(
                         player1 = p1,
                         player2 = p2,
@@ -1425,14 +1425,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         deck = deck,
                         turn = p1
                     )
-                    
+
                     cardGames[duelId] = gameState
-                    
+
                     // Signal client to switch to Xeri activity
                     val xeriStartMsg = gson.toJson(GameMessage(MessageType.CARD_GAME_MOVE, "Server", "XERI_START"))
                     onlineUsers[p1]?.send(Frame.Text(xeriStartMsg))
                     onlineUsers[p2]?.send(Frame.Text(xeriStartMsg))
-                    
+
                     // Delay slightly then broadcast first state
                     CoroutineScope(Dispatchers.Default).launch {
                         delay(1000)
@@ -1444,12 +1444,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
                     val p1 = updated.getString("player1") ?: ""
                     val p2 = updated.getString("player2") ?: ""
-                    
+
                     // Initial Board for Portes (example setup)
                     val initialBoard = MutableList(24) { 0 }
                     // Simple setup: 2 on 24, 5 on 13, 3 on 8, 5 on 6 for P1 (+ve)
                     // Symmetric for P2 (-ve)
-                    
+
                     val backgammonMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "BACKGAMMON_START"))
                     onlineUsers[p1]?.send(Frame.Text(backgammonMsg))
                     onlineUsers[p2]?.send(Frame.Text(backgammonMsg))
@@ -1466,21 +1466,21 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
                     val p1 = updated.getString("player1") ?: ""
                     val p2 = updated.getString("player2") ?: ""
-                    
+
                     val deck = createUnoDeck()
                     val p1Hand = mutableListOf<UnoCard>()
                     val p2Hand = mutableListOf<UnoCard>()
-                    
+
                     repeat(7) { p1Hand.add(deck.removeAt(0)) }
                     repeat(7) { p2Hand.add(deck.removeAt(0)) }
-                    
+
                     var firstCard = deck.removeAt(0)
                     while (firstCard.color == "WILD") { // Ensure first card is not wild
                         deck.add(firstCard)
                         deck.shuffle()
                         firstCard = deck.removeAt(0)
                     }
-                    
+
                     val gameState = UnoGameState(
                         player1 = p1,
                         player2 = p2,
@@ -1492,13 +1492,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         currentSuit = firstCard.color,
                         currentValue = firstCard.value
                     )
-                    
+
                     unoGames[duelId] = gameState
-                    
+
                     val unoStartMsg = gson.toJson(GameMessage(MessageType.CARD_GAME_MOVE, "Server", "UNO_START"))
                     onlineUsers[p1]?.send(Frame.Text(unoStartMsg))
                     onlineUsers[p2]?.send(Frame.Text(unoStartMsg))
-                    
+
                     CoroutineScope(Dispatchers.Default).launch {
                         delay(1000)
                         broadcastUnoState(duelId, gameState)
@@ -1506,11 +1506,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 }
             }
         }
-        
+
         MessageType.CARD_GAME_MOVE -> {
             val sender = msg.sender
             val content = msg.content ?: return
-            
+
             // Format: DUEL_ID|MOVE_TYPE|CARD_ID|CHOSEN_COLOR
             val parts = content.split("|")
             val duelId = parts.getOrNull(0) ?: return
@@ -1592,24 +1592,24 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 broadcastUnoState(duelId, game)
             }
         }
-        
+
         MessageType.DUEL_FINISH -> {
             val sender = msg.sender
             val stats = msg.content?.split("|") ?: return
             val score = stats.getOrNull(0)?.toIntOrNull() ?: 0
             val time = stats.getOrNull(1)?.toLongOrNull() ?: 0
             val gameType = stats.getOrNull(2) ?: "TRIVIA"
-            
+
             // Find active duel for this player
             val duel = duelsColl.find(Filters.and(
                 Filters.or(Filters.eq("player1", sender), Filters.eq("player2", sender)),
                 Filters.eq("status", "SETUP")
             )).firstOrNull() ?: return
-            
+
             val duelId = duel.getString("_id")
             if (sender == duel.getString("player1")) {
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_score", score), Updates.set("p1_time", time), Updates.set("p1_finished", true), Updates.set("gameType", gameType)))
-                
+
                 // Notify Receiver for ASYNC duels AFTER sender finishes
                 val isLive = duel.getBoolean("isLive") ?: false
                 if (!isLive) {
@@ -1641,7 +1641,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             } else {
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p2_score", score), Updates.set("p2_time", time), Updates.set("p2_finished", true), Updates.set("gameType", gameType)))
             }
-            
+
             val updated = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
             if (updated.getBoolean("p1_finished") == true && updated.getBoolean("p2_finished") == true) {
                 // Determine winner
@@ -1650,10 +1650,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val t1 = updated.getLong("p1_time") ?: 0L
                 val t2 = updated.getLong("p2_time") ?: 0L
                 val gType = updated.getString("gameType") ?: "TRIVIA"
-                
+
                 val p1 = updated.getString("player1") ?: ""
                 val p2 = updated.getString("player2") ?: ""
-                
+
                 var winner = ""
                 if (s1 > s2) winner = p1
                 else if (s2 > s1) winner = p2
@@ -1662,9 +1662,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     if (t1 < t2) winner = p1
                     else if (t2 < t1) winner = p2
                 }
-                
+
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("status", "COMPLETED"), Updates.set("winner", winner)))
-                
+
                 // Update Stats and History
                 recordMatchHistory(database, p1, p2, winner, gType)
                 updateDuelStats(duelStatsColl, p1, p2, winner)
@@ -1673,13 +1673,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val soloColl = database.getCollection<Document>("solo_leaderboard")
                 soloColl.updateOne(Filters.eq("name", p1), Updates.combine(Updates.max("maxScore", s1), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
                 soloColl.updateOne(Filters.eq("name", p2), Updates.combine(Updates.max("maxScore", s2), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-                
+
                 val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
                 onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
                 onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
             }
         }
-        
+
         MessageType.DUEL_HISTORY_REQUEST -> {
             val stats = duelStatsColl.find(Filters.eq("_id", msg.sender)).firstOrNull()
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_HISTORY_DATA, "Server", gson.toJson(stats ?: Document("_id", msg.sender).append("wins", 0).append("losses", 0).append("draws", 0))))))
@@ -1727,14 +1727,14 @@ suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
     val card = hand.find { it.id == cardId } ?: return
 
     hand.remove(card)
-    
+
     if (game.table.isNotEmpty()) {
         val top = game.table.last()
         if (card.rank == top.rank || card.rank == "J") {
             // Capture
             var points = calculateCardPoints(card) + game.table.sumOf { calculateCardPoints(it) }
             val capturedCount = game.table.size + 1
-            
+
             // Xeri detection
             if (game.table.size == 1 && card.rank == top.rank) {
                 points += if (card.rank == "J") 20 else 10
@@ -1781,10 +1781,10 @@ suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
             if (game.p1CardsTaken > game.p2CardsTaken) game.p1Points += 3
             else if (game.p2CardsTaken > game.p1CardsTaken) game.p2Points += 3
 
-            val winner = if (game.p1Points > game.p2Points) game.player1 
-                         else if (game.p2Points > game.p1Points) game.player2 
+            val winner = if (game.p1Points > game.p2Points) game.player1
+                         else if (game.p2Points > game.p1Points) game.player2
                          else ""
-            
+
             val duelStatsColl = database.getCollection<Document>("duel_stats")
             updateDuelStats(duelStatsColl, game.player1, game.player2, winner)
             recordMatchHistory(database, game.player1, game.player2, winner, "XERI")
@@ -1797,7 +1797,7 @@ suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
             return
         }
     }
-    
+
     broadcastCardState(gameId, game)
 }
 
@@ -1815,7 +1815,7 @@ suspend fun checkAndExpireDuels(duelsColl: MongoCollection<Document>, statsColl:
         val p2 = d.getString("player2") ?: ""
         val f1 = d.getBoolean("p1_finished") ?: false
         val f2 = d.getBoolean("p2_finished") ?: false
-        
+
         var winner = ""
         if (f1 && !f2) winner = p1
         else if (f2 && !f1) winner = p2
@@ -1834,7 +1834,7 @@ suspend fun checkAndExpireDuels(duelsColl: MongoCollection<Document>, statsColl:
 suspend fun fetchQuestions(count: Int, cats: List<String>, diffs: List<String>): List<Document> {
     val allQuestions = mutableListOf<Document>()
     val actualCats = if (cats.contains("Όλες") || cats.contains("Όλα")) ALL_CATEGORIES else cats
-    
+
     val filter = if (diffs.contains("Όλα") || diffs.isEmpty()) {
         Filters.empty()
     } else {
@@ -1853,7 +1853,7 @@ suspend fun fetchQuestions(count: Int, cats: List<String>, diffs: List<String>):
             println("SERVER ERROR: Could not fetch from category $cat: ${e.message}")
         }
     }
-    
+
     // --- ROBUST FALLBACK: If primary fetch yields nothing, grab from ANY Greek collection ---
     if (allQuestions.isEmpty()) {
         println("SERVER: fetchQuestions returned 0 results for cats: $cats. Falling back to General EL...")
@@ -1863,13 +1863,13 @@ suspend fun fetchQuestions(count: Int, cats: List<String>, diffs: List<String>):
             allQuestions.addAll(fallback)
         }
     }
-    
+
     // Final check - if STILL empty, return empty list (DB is truly empty)
     if (allQuestions.isEmpty()) {
         println("SERVER CRITICAL: All collections are empty!")
         return emptyList()
     }
-    
+
     return allQuestions.distinctBy { it.getString("text") ?: UUID.randomUUID().toString() }
         .shuffled().take(count)
 }
@@ -1878,7 +1878,7 @@ suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession)
     if (!::database.isInitialized) return
     val friendsDoc = database.getCollection<Document>("friends").find(Filters.eq("_id", user)).firstOrNull()
     val friendsList = (friendsDoc?.get("friends") as? List<*>)?.map { it.toString() } ?: emptyList()
-    
+
     val friends = friendsList.map { FriendInfo(it, onlineUsers.containsKey(it)) }
     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.FRIEND_LIST, "Server", gson.toJson(friends)))))
 }
@@ -1887,15 +1887,15 @@ suspend fun sendRequestList(user: String, session: DefaultWebSocketServerSession
     if (!::database.isInitialized) return
     try {
         val requestsColl = database.getCollection<Document>("requests")
-        
+
         // Incoming: requests where target is current user
         val incomingDoc = requestsColl.find(Filters.eq("_id", user)).firstOrNull()
         val incoming = (incomingDoc?.get("incoming") as? List<*>)?.map { it.toString() } ?: emptyList()
-        
+
         // Outgoing: requests where current user is in the requesters list
         val outgoingDoc = requestsColl.find(Filters.eq("_id", user)).firstOrNull()
         val outgoing = (outgoingDoc?.get("outgoing") as? List<*>)?.map { it.toString() } ?: emptyList()
-        
+
         val response = RequestLists(incoming, outgoing)
         session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REQUEST_LIST, "Server", gson.toJson(response)))))
         println("SERVER: Sync RequestList for $user -> In: ${incoming.size}, Out: ${outgoing.size}")
@@ -1977,7 +1977,7 @@ suspend fun runGameLoop(room: GameRoom) {
             var sdIdx = 0
             // For Sudden Death, we now use the provided questions or a generic fallback if needed
             val sdQuestions = fetchQuestions(10, listOf("Όλες"), listOf("Όλα"))
-            
+
             while (room.players.count { !it.isEliminated } > 1 && sdIdx < sdQuestions.size && room.isGameRunning) {
                 val q = sdQuestions[sdIdx]
                 sendQuestionAndWait(room, q)
@@ -2001,11 +2001,11 @@ suspend fun sendQuestionAndWait(room: GameRoom, masterQuestion: Document) {
     val correctIdx = masterQuestion.getInteger("correctAnswerIndex") ?: 0
     room.players.forEach { it.hasAnswered = false; it.lastAnswerIndex = -1 }
     room.waitingForAnswers = true
-    
+
     // Structure: recipients (all in room)
     val recipients = room.players.map { it.session }.toMutableSet()
     recipients.add(room.hostSession)
-    
+
     recipients.forEach { sess ->
         try { sess.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION, "Server", gson.toJson(masterQuestion))))) } catch (e: Exception) {}
     }
@@ -2037,7 +2037,7 @@ suspend fun sendQuestionAndWait(room: GameRoom, masterQuestion: Document) {
 suspend fun calculateStats(coll: MongoCollection<Document>, user: String): Map<String, Int> {
     val doc = coll.find(Filters.eq("_id", user)).firstOrNull()
     val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
-    
+
     val blitzTimestamps = doc?.getList("blitz_timestamps", Long::class.javaObjectType) ?: emptyList()
     val recentBlitz = blitzTimestamps.filter { it > dayAgo }.size
     val blitzBonus = doc?.getInteger("blitz_bonus") ?: 0
@@ -2047,7 +2047,7 @@ suspend fun calculateStats(coll: MongoCollection<Document>, user: String): Map<S
     val recentChal = chalTimestamps.filter { it > dayAgo }.size
     val chalBonus = doc?.getInteger("bonus_charges") ?: 0
     val remainingChal = (3 - recentChal + chalBonus).coerceAtMost(100)
-    
+
     val soloTimestamps = doc?.getList("solo_timestamps", Long::class.javaObjectType) ?: emptyList()
     val recentSolo = soloTimestamps.filter { it > dayAgo }.size
     val soloBonus = doc?.getInteger("solo_bonus") ?: 0
@@ -2063,17 +2063,17 @@ suspend fun calculateStats(coll: MongoCollection<Document>, user: String): Map<S
 suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, isBlitz: Boolean = false, isSolo: Boolean = false): String? {
     val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
     val doc = coll.find(Filters.eq("_id", user)).firstOrNull() ?: return null
-    
+
     val field = if (isBlitz) "blitz_bonus" else if (isSolo) "solo_bonus" else "bonus_charges"
     val timestampField = if (isBlitz) "blitz_timestamps" else if (isSolo) "solo_timestamps" else "timestamps"
     val maxLimit = if (isBlitz) 5 else if (isSolo) 10 else 3
 
     val bonus = doc.getInteger(field) ?: 0
     if (bonus > 0) return null
-    
+
     val timestamps = doc.getList(timestampField, Long::class.javaObjectType) ?: emptyList()
     val recent = timestamps.filter { it > dayAgo }
-    
+
     if (recent.size >= maxLimit) return "LIMIT_REACHED"
     return null
 }
@@ -2081,7 +2081,7 @@ suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, i
 suspend fun recordChallenge(coll: MongoCollection<Document>, user: String, isBlitz: Boolean = false, isSolo: Boolean = false) {
     val dayAgo = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
     val doc = coll.find(Filters.eq("_id", user)).firstOrNull()
-    
+
     val field = if (isBlitz) "blitz_bonus" else if (isSolo) "solo_bonus" else "bonus_charges"
     val timestampField = if (isBlitz) "blitz_timestamps" else if (isSolo) "solo_timestamps" else "timestamps"
 
@@ -2090,9 +2090,9 @@ suspend fun recordChallenge(coll: MongoCollection<Document>, user: String, isBli
         coll.updateOne(Filters.eq("_id", user), Updates.inc(field, -1))
         return
     }
-    
+
     val timestamps = (doc?.getList(timestampField, Long::class.javaObjectType) ?: emptyList()).filter { it > dayAgo }.toMutableList()
     timestamps.add(System.currentTimeMillis())
-    
+
     coll.updateOne(Filters.eq("_id", user), Updates.combine(Updates.set(timestampField, timestamps), Updates.setOnInsert("_id", user)), UpdateOptions().upsert(true))
 }
