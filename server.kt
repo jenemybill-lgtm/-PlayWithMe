@@ -1259,39 +1259,28 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 } else {
                     // ASYNC Random Matchmaking (Trivia only for now)
                     if (gameType == "TRIVIA") {
-                        val openDuel = duelsColl.find(Filters.and(
-                            Filters.eq("player2", "RANDOM_SEARCH"),
-                            Filters.ne("player1", host),
-                            Filters.eq("isLive", false)
+                        // Pick a random user from the database to challenge asynchronously
+                        val targetDoc = usersColl.aggregate(listOf(
+                            Aggregates.match(Filters.ne("name", host)),
+                            Aggregates.sample(1)
                         )).firstOrNull()
+                        val target = targetDoc?.getString("name") ?: "RANDOM_SEARCH"
 
-                        if (openDuel != null) {
-                            val duelId = openDuel.getString("_id")
-                            val p1 = openDuel.getString("player1")
-                            duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(
-                                Updates.set("player2", host),
-                                Updates.set("p2_cats", parts.getOrNull(2) ?: "")
-                            ))
+                        val duelId = "DUEL_RAND_ASYNC_${System.currentTimeMillis()}"
+                        val duelDoc = Document("_id", duelId)
+                            .append("player1", host)
+                            .append("player2", target)
+                            .append("status", "SETUP")
+                            .append("isLive", false)
+                            .append("gameType", "TRIVIA")
+                            .append("p1_ready", false)
+                            .append("p2_ready", false)
+                            .append("p1_cats", parts.getOrNull(2) ?: "")
+                            .append("createdAt", Date())
+                        duelsColl.insertOne(duelDoc)
 
-                            val setupStr = "$duelId|$p1|$host|true|TRIVIA"
-                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
-                        } else {
-                            val duelId = "DUEL_RAND_ASYNC_${System.currentTimeMillis()}"
-                            val duelDoc = Document("_id", duelId)
-                                .append("player1", host)
-                                .append("player2", "RANDOM_SEARCH")
-                                .append("status", "SETUP")
-                                .append("isLive", false)
-                                .append("gameType", "TRIVIA")
-                                .append("p1_ready", false)
-                                .append("p2_ready", false)
-                                .append("p1_cats", parts.getOrNull(2) ?: "")
-                                .append("createdAt", Date())
-                            duelsColl.insertOne(duelDoc)
-
-                            val setupStr = "$duelId|$host|Αναμονή...|true|TRIVIA"
-                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
-                        }
+                        val setupStr = "$duelId|$host|$target|true|TRIVIA"
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))))
                     }
                 }
             } else {
