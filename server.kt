@@ -617,22 +617,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val updates = mutableListOf<org.bson.conversions.Bson>()
             when (mode) {
                 "SOLO" -> {
-                    updates.add(Updates.set("solo_bonus", 20))
+                    updates.add(Updates.set("solo_bonus", 50))
                     updates.add(Updates.set("solo_timestamps", emptyList<Long>()))
                 }
                 "BLITZ" -> {
-                    updates.add(Updates.set("blitz_bonus", 10))
+                    updates.add(Updates.set("blitz_bonus", 20))
                     updates.add(Updates.set("blitz_timestamps", emptyList<Long>()))
                 }
                 "DUEL" -> {
-                    updates.add(Updates.set("bonus_charges", 5))
+                    updates.add(Updates.set("bonus_charges", 10))
                     updates.add(Updates.set("timestamps", emptyList<Long>()))
                 }
                 else -> {
                     // Default reset all if no mode specified
-                    updates.add(Updates.set("bonus_charges", 5))
-                    updates.add(Updates.set("blitz_bonus", 10))
-                    updates.add(Updates.set("solo_bonus", 20))
+                    updates.add(Updates.set("bonus_charges", 10))
+                    updates.add(Updates.set("blitz_bonus", 20))
+                    updates.add(Updates.set("solo_bonus", 50))
                     updates.add(Updates.set("timestamps", emptyList<Long>()))
                     updates.add(Updates.set("blitz_timestamps", emptyList<Long>()))
                     updates.add(Updates.set("solo_timestamps", emptyList<Long>()))
@@ -2030,17 +2030,17 @@ suspend fun calculateStats(coll: MongoCollection<Document>, user: String): Map<S
     val blitzTimestamps = doc?.getList("blitz_timestamps", Long::class.javaObjectType) ?: emptyList()
     val recentBlitz = blitzTimestamps.filter { it > dayAgo }.size
     val blitzBonus = doc?.getInteger("blitz_bonus") ?: 0
-    val remainingBlitz = (5 - recentBlitz + blitzBonus).coerceAtMost(100)
+    val remainingBlitz = (20 - recentBlitz + blitzBonus).coerceAtMost(100).coerceAtLeast(0)
 
     val chalTimestamps = doc?.getList("timestamps", Long::class.javaObjectType) ?: emptyList()
     val recentChal = chalTimestamps.filter { it > dayAgo }.size
     val chalBonus = doc?.getInteger("bonus_charges") ?: 0
-    val remainingChal = (3 - recentChal + chalBonus).coerceAtMost(100)
+    val remainingChal = (10 - recentChal + chalBonus).coerceAtMost(100).coerceAtLeast(0)
 
     val soloTimestamps = doc?.getList("solo_timestamps", Long::class.javaObjectType) ?: emptyList()
     val recentSolo = soloTimestamps.filter { it > dayAgo }.size
     val soloBonus = doc?.getInteger("solo_bonus") ?: 0
-    val remainingSolo = (10 - recentSolo + soloBonus).coerceAtMost(100)
+    val remainingSolo = (50 - recentSolo + soloBonus).coerceAtMost(100).coerceAtLeast(0)
 
     return mapOf(
         "blitzRemaining" to remainingBlitz,
