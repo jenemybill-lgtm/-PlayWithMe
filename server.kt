@@ -154,7 +154,8 @@ data class XeriGameState(
     var p1CardsTaken: Int = 0,
     var p2CardsTaken: Int = 0,
     var lastToTake: String = "",
-    var status: String = "ACTIVE" // ACTIVE, FINISHED
+    var status: String = "ACTIVE",
+    var lastPlayedCard: Card? = null
 )
 
 val cardGames = ConcurrentHashMap<String, XeriGameState>()
@@ -1720,6 +1721,7 @@ suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
     val card = hand.find { it.id == cardId } ?: return
 
     hand.remove(card)
+    game.lastPlayedCard = card
 
     if (game.table.isNotEmpty()) {
         val top = game.table.last()
