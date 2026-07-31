@@ -22,8 +22,8 @@ import redis.clients.jedis.JedisPool
 import redis.clients.jedis.JedisPoolConfig
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "3.4.2"
-const val LATEST_VERSION_CODE = 27
+const val LATEST_VERSION_NAME = "3.4.3"
+const val LATEST_VERSION_CODE = 28
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 val REDIS_URL = System.getenv("REDIS_URL") ?: "redis://localhost:6379"
@@ -109,8 +109,9 @@ data class UnoGameState(
     var turn: String = "",
     var currentSuit: String = "", // Current color to match
     var currentValue: String = "", // Current number/action to match
-    var direction: Int = 1, // 1 or -1 (for multi-player, though we start with 2)
-    var status: String = "ACTIVE"
+    var direction: Int = 1, // 1 or -1
+    var status: String = "ACTIVE",
+    var lastPlayedCard: UnoCard? = null
 )
 
 val unoGames = ConcurrentHashMap<String, UnoGameState>()
@@ -197,7 +198,8 @@ data class AgoniaGameState(
     var turn: String = "",
     var currentSuit: String = "",
     var currentValue: String = "",
-    var status: String = "ACTIVE"
+    var status: String = "ACTIVE",
+    var lastPlayedCard: Card? = null
 )
 val agoniaGames = ConcurrentHashMap<String, AgoniaGameState>()
 
@@ -1700,6 +1702,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     if (!canPlay) return
                     hand.remove(card)
                     game.discardPile.add(card)
+                    game.lastPlayedCard = card
                     game.currentSuit = if (card.color == "WILD") parts.getOrNull(3) ?: "RED" else card.color
                     game.currentValue = card.value
                     var skipNext = false
@@ -1745,6 +1748,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     if (card.rank != "A" && card.suit != game.currentSuit && card.rank != game.currentValue) return
                     hand.remove(card)
                     game.discardPile.add(card)
+                    game.lastPlayedCard = card
                     game.currentSuit = if (card.rank == "A") parts.getOrNull(3) ?: "♠️" else card.suit
                     game.currentValue = card.rank
                     if (card.rank == "7") {
@@ -1775,6 +1779,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 when (moveType) {
                     "DISCARD" -> {
                         hand.remove(card); game.tableFree.add(card)
+                        game.lastPlayedCard = card
                         dilotiNextTurn(duelId, game)
                     }
                     "CAPTURE" -> {
@@ -1786,6 +1791,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             game.declarations.forEach { d -> toCapture.addAll(d.cards) }
                             game.tableFree.clear(); game.declarations.clear()
                         } else {
+                            // Security: Block capturing individual cards that belong to declarations
+                            val cardsInDecls = game.declarations.flatMap { it.cards }.map { it.id }.toSet()
+                            if (tableIds.any { cardsInDecls.contains(it) }) {
+                                println("SERVER SECURITY: Blocked capture of locked declaration card.")
+                                return
+                            }
+
                             toCapture.addAll(game.tableFree.filter { tableIds.contains(it.id) })
                             game.tableFree.removeAll(toCapture)
                             val declVal = parts.getOrNull(4)?.toIntOrNull()
@@ -1794,6 +1806,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         }
                         
                         hand.remove(card)
+                        game.lastPlayedCard = card
                         var points = calculateCardPoints(card) + toCapture.sumOf { calculateCardPoints(it) }
                         val isXeri = (game.tableFree.size + game.declarations.size) == 0 && toCapture.size == 1 && toCapture[0].rank == card.rank && card.rank != "J"
                         if (isXeri) points += if (card.rank == "A") 20 else 10
@@ -1803,11 +1816,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         dilotiNextTurn(duelId, game)
                     }
                     "DECLARE" -> {
-                        val targetId = parts.getOrNull(3) ?: return
-                        val target = game.tableFree.find { it.id == targetId } ?: return
+                        val targetIds = parts.getOrNull(3)?.split(",") ?: emptyList()
+                        val toCapture = game.tableFree.filter { targetIds.contains(it.id) }
+                        if (toCapture.isEmpty()) return
+                        
                         val value = parts.getOrNull(4)?.toIntOrNull() ?: return
-                        hand.remove(card); game.tableFree.remove(target)
-                        game.declarations.add(DeclarationGroup(listOf(card, target), value, sender))
+                        hand.remove(card); game.tableFree.removeAll(toCapture)
+                        game.declarations.add(DeclarationGroup(toCapture + card, value, sender))
+                        game.lastPlayedCard = card
                         dilotiNextTurn(duelId, game)
                     }
                     "INCREASE" -> {
@@ -1816,6 +1832,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         val newVal = parts.getOrNull(4)?.toIntOrNull() ?: return
                         hand.remove(card); game.declarations.remove(target)
                         game.declarations.add(DeclarationGroup(target.cards + card, newVal, sender))
+                        game.lastPlayedCard = card
                         dilotiNextTurn(duelId, game)
                     }
                 }
