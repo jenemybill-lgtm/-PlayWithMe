@@ -22,8 +22,8 @@ import redis.clients.jedis.JedisPool
 import redis.clients.jedis.JedisPoolConfig
 
 // ==================== CONFIG ====================
-const val LATEST_VERSION_NAME = "3.4.2"
-const val LATEST_VERSION_CODE = 27
+const val LATEST_VERSION_NAME = "3.4.3"
+const val LATEST_VERSION_CODE = 28
 val UPDATE_URL = "https://github.com/jenemybill-lgtm/-PlayWithMe/releases/download/v$LATEST_VERSION_NAME/app-debug.apk"
 val MONGODB_URI = System.getenv("MONGODB_URI") ?: "mongodb+srv://jenemybill:Bill1908@jenemybill.jchjibj.mongodb.net/playwithme?retryWrites=true&w=majority"
 val REDIS_URL = System.getenv("REDIS_URL") ?: "redis://localhost:6379"
@@ -183,8 +183,9 @@ fun calculateCardPoints(card: Card): Int {
 
 fun broadcastCardState(gameId: String, game: XeriGameState) {
     val stateJson = gson.toJson(game)
-    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", stateJson)))) } }
-    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", stateJson)))) } }
+    val msg = gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "XERI|$stateJson"))
+    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(msg)) } }
+    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(msg)) } }
 }
 
 // --- AGONIA ---
@@ -274,10 +275,24 @@ data class BoardGameState(
     var status: String = "ACTIVE",
     var lastMove: String = ""
 )
+
+data class BackgammonState(
+    val player1: String,
+    val player2: String,
+    val board: MutableList<Int> = MutableList(24) { 0 }, 
+    var dice: MutableList<Int> = mutableListOf(),
+    var turn: String = "",
+    var p1Bar: Int = 0,
+    var p2Bar: Int = 0,
+    var p1Off: Int = 0,
+    var p2Off: Int = 0,
+    var status: String = "ACTIVE"
+)
+
 val boardGames = ConcurrentHashMap<String, BoardGameState>()
 
 fun broadcastBoardState(gameId: String, game: BoardGameState) {
-    val text = gson.toJson(GameMessage(MessageType.BOARD_GAME_STATE, "Server", gson.toJson(game)))
+    val text = gson.toJson(GameMessage(MessageType.BOARD_GAME_STATE, "Server", "${game.gameType}|${gson.toJson(game)}"))
     onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(text)) } }
     onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(text)) } }
 }
@@ -897,8 +912,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val player = room?.players?.find { it.session == session }
             if (room != null && player != null) {
                 if (msg.content == "CLIENT_READY") {
-                    player.hasAnswered = true
-                    println("SERVER: Structural Handshake -> Player ${player.name} is READY.")
+                    // Just a handshake, don't mark as "answered" for the game loop
+                    println("SERVER: Handshake -> Player ${player.name} is READY.")
                     return
                 }
 
@@ -1533,7 +1548,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
                     val p1 = updated.getString("player1") ?: ""
                     val p2 = updated.getString("player2") ?: ""
-                    val gameState = BoardGameState(p1, p2, gameType, p1)
+                    
+                    val b = MutableList(24) { 0 }
+                    b[0] = 2; b[11] = 5; b[16] = 3; b[18] = 5
+                    b[23] = -2; b[12] = -5; b[7] = -3; b[5] = -5
+                    val bgState = BackgammonState(player1 = p1, player2 = p2, board = b, turn = p1)
+                    
+                    val gameState = BoardGameState(p1, p2, gameType, p1, gson.toJson(bgState))
                     boardGames[duelId] = gameState
                     val startMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "${gameType}_START"))
                     onlineUsers[p1]?.send(Frame.Text(startMsg))
@@ -1544,9 +1565,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
                     val p1 = updated.getString("player1") ?: ""
                     val p2 = updated.getString("player2") ?: ""
-                    val gameState = BoardGameState(p1, p2, gameType, p1)
+                    val gameState = BoardGameState(p1, p2, gameType, p1, "INITIAL")
                     boardGames[duelId] = gameState
-                    val startMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "${gameType}_START"))
+                    val startMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "CHESS_START"))
+                    onlineUsers[p1]?.send(Frame.Text(startMsg))
+                    onlineUsers[p2]?.send(Frame.Text(startMsg))
+                    CoroutineScope(Dispatchers.Default).launch { delay(1000); broadcastBoardState(duelId, gameState) }
+                }
+            } else if (gameType == "CHECKERS") {
+                if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
+                    val p1 = updated.getString("player1") ?: ""
+                    val p2 = updated.getString("player2") ?: ""
+                    val gameState = BoardGameState(p1, p2, gameType, p1, "INITIAL")
+                    boardGames[duelId] = gameState
+                    val startMsg = gson.toJson(GameMessage(MessageType.BOARD_GAME_MOVE, "Server", "CHECKERS_START"))
                     onlineUsers[p1]?.send(Frame.Text(startMsg))
                     onlineUsers[p2]?.send(Frame.Text(startMsg))
                     CoroutineScope(Dispatchers.Default).launch { delay(1000); broadcastBoardState(duelId, gameState) }
@@ -1651,18 +1683,66 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val game = boardGames[duelId] ?: return
             if (game.status == "FINISHED" || game.turn != msg.sender) return
 
-            if (moveType == "MOVE") {
-                game.boardJson = parts.getOrNull(2) ?: ""
-                game.lastMove = content.substringAfter("|MOVE|").substringAfter("|") // Take everything after boardJson
-                game.turn = if (msg.sender == game.player1) game.player2 else game.player1
-            } else if (moveType == "WIN") {
-                game.status = "FINISHED"
-                val winner = msg.sender
-                updateDuelStats(duelStatsColl, game.player1, game.player2, winner)
-                recordMatchHistory(database, game.player1, game.player2, winner, game.gameType)
-                val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", "ΝΙΚΗΤΗΣ: $winner!"))
-                onlineUsers[game.player1]?.send(Frame.Text(finalMsg))
-                onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
+            if (game.gameType == "BACKGAMMON") {
+                val bgState = gson.fromJson(game.boardJson, BackgammonState::class.java) ?: return
+                
+                when (moveType) {
+                    "ROLL" -> {
+                        val d1 = (1..6).random(); val d2 = (1..6).random()
+                        bgState.dice = if (d1 == d2) mutableListOf(d1, d1, d1, d1) else mutableListOf(d1, d2)
+                        // Note: Turn logic and move validation happen on client for now, 
+                        // but we should eventually add server-side validation.
+                    }
+                    "MOVE" -> {
+                        val from = parts[2].toInt(); val to = parts[3].toInt(); val diceUsed = parts[4].toInt()
+                        val isP1 = msg.sender == game.player1
+                        if (from == -1) { if (isP1) bgState.p1Bar-- else bgState.p2Bar-- } else bgState.board[from] = if (isP1) bgState.board[from] - 1 else bgState.board[from] + 1
+                        val targetCount = bgState.board[to]
+                        if ((isP1 && targetCount == -1) || (!isP1 && targetCount == 1)) { bgState.board[to] = if (isP1) 1 else -1; if (isP1) bgState.p2Bar++ else bgState.p1Bar++ }
+                        else bgState.board[to] = if (isP1) targetCount + 1 else targetCount - 1
+                        bgState.dice.remove(diceUsed)
+                        if (bgState.dice.isEmpty()) bgState.turn = if (isP1) game.player2 else game.player1
+                        game.turn = bgState.turn
+                    }
+                    "BEAROFF" -> {
+                        val from = parts[2].toInt(); val diceUsed = parts[3].toInt()
+                        val isP1 = msg.sender == game.player1
+                        bgState.board[from] = if (isP1) bgState.board[from] - 1 else bgState.board[from] + 1
+                        if (isP1) bgState.p1Off++ else bgState.p2Off++
+                        bgState.dice.remove(diceUsed)
+                        if (bgState.dice.isEmpty()) bgState.turn = if (isP1) game.player2 else game.player1
+                        game.turn = bgState.turn
+                        if (bgState.p1Off == 15 || bgState.p2Off == 15) {
+                            game.status = "FINISHED"
+                            val winner = msg.sender
+                            updateDuelStats(duelStatsColl, game.player1, game.player2, winner)
+                            recordMatchHistory(database, game.player1, game.player2, winner, game.gameType)
+                            val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", "ΝΙΚΗΤΗΣ: $winner!"))
+                            onlineUsers[game.player1]?.send(Frame.Text(finalMsg)); onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
+                        }
+                    }
+                    "PASS" -> {
+                        bgState.dice.clear()
+                        bgState.turn = if (msg.sender == game.player1) game.player2 else game.player1
+                        game.turn = bgState.turn
+                    }
+                }
+                game.boardJson = gson.toJson(bgState)
+            } else {
+                // Generic handler for Chess/Checkers
+                if (moveType == "MOVE") {
+                    game.boardJson = parts.getOrNull(2) ?: ""
+                    game.lastMove = content.substringAfter("|MOVE|").substringAfter("|") 
+                    game.turn = if (msg.sender == game.player1) game.player2 else game.player1
+                } else if (moveType == "WIN") {
+                    game.status = "FINISHED"
+                    val winner = msg.sender
+                    updateDuelStats(duelStatsColl, game.player1, game.player2, winner)
+                    recordMatchHistory(database, game.player1, game.player2, winner, game.gameType)
+                    val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", "ΝΙΚΗΤΗΣ: $winner!"))
+                    onlineUsers[game.player1]?.send(Frame.Text(finalMsg))
+                    onlineUsers[game.player2]?.send(Frame.Text(finalMsg))
+                }
             }
             broadcastBoardState(duelId, game)
         }
