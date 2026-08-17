@@ -2332,17 +2332,17 @@ suspend fun calculateStats(coll: MongoCollection<Document>, user: String): Map<S
     val blitzTimestamps = doc?.getList("blitz_timestamps", Long::class.javaObjectType) ?: emptyList()
     val recentBlitz = blitzTimestamps.filter { it > dayAgo }.size
     val blitzBonus = doc?.getInteger("blitz_bonus") ?: 0
-    val remainingBlitz = (100 - recentBlitz + blitzBonus).coerceAtMost(100).coerceAtLeast(0)
+    val remainingBlitz = (10 - recentBlitz + blitzBonus).coerceAtMost(100).coerceAtLeast(0)
 
     val chalTimestamps = doc?.getList("timestamps", Long::class.javaObjectType) ?: emptyList()
     val recentChal = chalTimestamps.filter { it > dayAgo }.size
     val chalBonus = doc?.getInteger("bonus_charges") ?: 0
-    val remainingChal = (100 - recentChal + chalBonus).coerceAtMost(100).coerceAtLeast(0)
+    val remainingChal = (10 - recentChal + chalBonus).coerceAtMost(100).coerceAtLeast(0)
 
     val soloTimestamps = doc?.getList("solo_timestamps", Long::class.javaObjectType) ?: emptyList()
     val recentSolo = soloTimestamps.filter { it > dayAgo }.size
     val soloBonus = doc?.getInteger("solo_bonus") ?: 0
-    val remainingSolo = (100 - recentSolo + soloBonus).coerceAtMost(100).coerceAtLeast(0)
+    val remainingSolo = (10 - recentSolo + soloBonus).coerceAtMost(100).coerceAtLeast(0)
 
     return mapOf(
         "blitzRemaining" to remainingBlitz,
@@ -2357,7 +2357,7 @@ suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, i
 
     val field = if (isBlitz) "blitz_bonus" else if (isSolo) "solo_bonus" else "bonus_charges"
     val timestampField = if (isBlitz) "blitz_timestamps" else if (isSolo) "solo_timestamps" else "timestamps"
-    val maxLimit = 100 // High limit for testing
+    val maxLimit = 10 // Restricted to 10 for official play
 
     val bonus = doc.getInteger(field) ?: 0
     if (bonus > 0) return null
