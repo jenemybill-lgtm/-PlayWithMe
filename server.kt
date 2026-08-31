@@ -519,7 +519,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
     val offlineScoresColl = database.getCollection<Document>("offline_scores")
     val pendingColl = database.getCollection<Document>("pending_messages")
     val duelsColl = database.getCollection<Document>("duels")
-    val duelStatsColl = database.getCollection<Document>("duel_stats")
+    val triviaStatsColl = database.getCollection<Document>("leaderboard_trivia")
     val usageColl = database.getCollection<Document>("challenge_usage")
     val historyColl = database.getCollection<Document>("match_history")
 
@@ -1191,7 +1191,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val targetColl = when(mode) {
                 "BLITZ" -> database.getCollection<Document>("leaderboard_blitz")
                 "SOLO", "SOLO_TRIVIA" -> database.getCollection<Document>("leaderboard_solo")
-                "TRIVIA", "DUEL" -> database.getCollection<Document>("leaderboard_trivia")
+                "TRIVIA", "DUEL" -> database.getCollection<Document>("leaderboard_trivia") // For Trivia Duels
                 else -> database.getCollection<Document>("leaderboard_${mode.lowercase()}")
             }
 
@@ -1202,6 +1202,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     if (sortField == "wins") {
                         mapOf("name" to (it.getString("_id") ?: it.getString("name") ?: "Anon"), "score" to (it.getInteger("wins") ?: 0))
                     } else {
+                        // Return raw maxScore
                         mapOf("name" to (it.getString("name") ?: "Anon"), "score" to (it.getInteger("maxScore") ?: 0))
                     }
                 }
@@ -1958,11 +1959,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 recordMatchHistory(database, p1, p2, winner, gType)
                 updateDuelStats(database, p1, p2, winner, gType)
 
-                // SYNC TO SOLO LEADERBOARD as well
-                val soloColl = database.getCollection<Document>("leaderboard_solo")
-                soloColl.updateOne(Filters.eq("name", p1), Updates.combine(Updates.max("maxScore", s1), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-                soloColl.updateOne(Filters.eq("name", p2), Updates.combine(Updates.max("maxScore", s2), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-
                 val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
                 onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
                 onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
@@ -2393,7 +2389,7 @@ suspend fun checkChallengeLimit(coll: MongoCollection<Document>, user: String, i
 
     val field = if (isBlitz) "blitz_bonus" else if (isSolo) "solo_bonus" else "bonus_charges"
     val timestampField = if (isBlitz) "blitz_timestamps" else if (isSolo) "solo_timestamps" else "timestamps"
-    val maxLimit = 10 
+    val maxLimit = 100 // Increased for user testing 
 
     val bonus = doc.getInteger(field) ?: 0
     if (bonus > 0) return null
