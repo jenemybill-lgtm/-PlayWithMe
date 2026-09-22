@@ -40,7 +40,7 @@ val redisPool = try {
 
 var isRedisActive = try { redisPool.resource.use { it.ping() == "PONG" } } catch(e: Exception) { false }
 
-val ADMIN_USERS = setOf("jenemybill")
+val ADMIN_USERS = setOf("jenemybill", "admin", "basil")
 val lastSubmissionTime = ConcurrentHashMap<String, Long>()
 
 fun containsProfanity(text: String): Boolean {
@@ -1313,7 +1313,26 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             }
         }
 
-        // MessageType.REJECT_QUESTION REMOVED
+        MessageType.REJECT_QUESTION -> {
+            if (ADMIN_USERS.contains(msg.sender)) {
+                try {
+                    val rawContent = msg.content ?: return
+                    val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
+                    val cleanId = idMatch?.value
+                    if (cleanId != null) {
+                        val id = org.bson.types.ObjectId(cleanId)
+                        val suggestionsColl = database.getCollection<Document>("suggested_questions")
+                        val result = suggestionsColl.deleteOne(Filters.eq("_id", id))
+                        if (result.deletedCount > 0) {
+                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "REJECTED"))))
+                            println("SERVER: Question $cleanId REJECTED and deleted from suggestions.")
+                        }
+                    }
+                } catch (e: Exception) {
+                    println("REJECT ERROR: ${e.message}")
+                }
+            }
+        }
 
         // ==================== DISCOVER PLAYERS REMOVED ====================
 
@@ -1483,7 +1502,24 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val updated = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
 
             if (gameType == "TRIVIA") {
-                // ...
+                val isLive = updated.getBoolean("isLive") ?: false
+                val questionsList = updated.get("questions", List::class.java) as? List<Document> ?: emptyList()
+                val questionsJson = parts.getOrNull(2) ?: gson.toJson(questionsList)
+                val setupData = mapOf("timer" to 20, "questions" to questionsJson)
+                val startMsg = gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(setupData)))
+
+                if (!isLive) {
+                    // Async duel: send START_GAME immediately to the player setting up
+                    session.send(Frame.Text(startMsg))
+                } else {
+                    // Live duel: send START_GAME to both players once both are ready
+                    if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
+                        val p1 = updated.getString("player1") ?: ""
+                        val p2 = updated.getString("player2") ?: ""
+                        onlineUsers[p1]?.send(Frame.Text(startMsg))
+                        onlineUsers[p2]?.send(Frame.Text(startMsg))
+                    }
+                }
             } else if (gameType == "XERI") {
                 if (updated.getBoolean("p1_ready") == true && updated.getBoolean("p2_ready") == true) {
                     val p1 = updated.getString("player1") ?: ""
@@ -1886,16 +1922,34 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.DUEL_FINISH -> {
             val sender = msg.sender
             val stats = msg.content?.split("|") ?: return
-            val score = stats.getOrNull(0)?.toIntOrNull() ?: 0
-            val time = stats.getOrNull(1)?.toLongOrNull() ?: 0
-            val gameType = stats.getOrNull(2) ?: "TRIVIA"
+            
+            var duelIdParam: String? = null
+            var score = 0
+            var time = 0L
+            var gameType = "TRIVIA"
+
+            if (stats.getOrNull(0)?.startsWith("DUEL_") == true) {
+                duelIdParam = stats.getOrNull(0)
+                score = stats.getOrNull(1)?.toIntOrNull() ?: 0
+                time = stats.getOrNull(2)?.toLongOrNull() ?: 0
+                gameType = stats.getOrNull(3) ?: "TRIVIA"
+            } else {
+                score = stats.getOrNull(0)?.toIntOrNull() ?: 0
+                time = stats.getOrNull(1)?.toLongOrNull() ?: 0
+                gameType = stats.getOrNull(2) ?: "TRIVIA"
+            }
 
             // Find active duel for this player
-            val duel = duelsColl.find(Filters.and(
-                Filters.or(Filters.eq("player1", sender), Filters.eq("player2", sender)),
-                Filters.eq("status", "SETUP")
-            )).firstOrNull() ?: return
+            val duelFilter = if (duelIdParam != null) {
+                Filters.eq("_id", duelIdParam)
+            } else {
+                Filters.and(
+                    Filters.or(Filters.eq("player1", sender), Filters.eq("player2", sender)),
+                    Filters.eq("status", "SETUP")
+                )
+            }
 
+            val duel = duelsColl.find(duelFilter).firstOrNull() ?: return
             val duelId = duel.getString("_id")
             if (sender == duel.getString("player1")) {
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_score", score), Updates.set("p1_time", time), Updates.set("p1_finished", true), Updates.set("gameType", gameType)))
