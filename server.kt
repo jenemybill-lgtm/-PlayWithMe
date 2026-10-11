@@ -70,7 +70,7 @@ enum class MessageType {
     // Offline Sync & Question Moderation
     SUGGEST_QUESTION, SUGGEST_QUESTION_RESPONSE,
     GET_PENDING_QUESTIONS, PENDING_QUESTIONS_DATA,
-    APPROVE_QUESTION, QUESTION_MODERATION_RESPONSE,
+    APPROVE_QUESTION, REJECT_QUESTION, QUESTION_MODERATION_RESPONSE,
     SYNC_OFFLINE_SCORES, SYNC_OFFLINE_SCORES_RESPONSE,
     CHECK_NEW_QUESTIONS, NEW_QUESTIONS_DATA,
     USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS,
@@ -566,7 +566,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             onlineUsers[official] = session
 
             // Check for Expired Duels (24h Auto-Win)
-            checkAndExpireDuels(duelsColl, duelStatsColl, official)
+            checkAndExpireDuels(duelsColl, triviaStatsColl, official)
 
             // Redis: Mark user as online
             try {
