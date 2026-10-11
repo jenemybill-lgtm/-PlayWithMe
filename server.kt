@@ -1847,56 +1847,6 @@ suspend fun updateDuelStats(db: MongoDatabase, p1: String, p2: String, winner: S
     }
 }
 
-suspend fun handleXeriMove(gameId: String, player: String, cardId: String) {
-    val game = cardGames[gameId] ?: return
-    if (game.status == "FINISHED") return
-    if (game.turn != player) return
-
-    val hand = if (player == game.player1) game.p1Hand else game.p2Hand
-    val card = hand.find { it.id == cardId } ?: return
-
-    hand.remove(card)
-    game.lastPlayedCard = card
-
-    if (game.table.isNotEmpty()) {
-        val top = game.table.last()
-        if (card.rank == top.rank || card.rank == "J") {
-            // Capture
-            var points = calculateCardPoints(card) + game.table.sumOf { calculateCardPoints(it) }
-            val capturedCount = game.table.size + 1
-
-            // Xeri detection
-            if (game.table.size == 1 && card.rank == top.rank) {
-                points += if (card.rank == "A") 20 else 10
-            }
-
-            if (player == game.player1) {
-                game.p1Points += points
-                game.p1CardsTaken += capturedCount
-            } else {
-                game.p2Points += points
-                game.p2CardsTaken += capturedCount
-            }
-            game.table.clear()
-            game.lastToTake = player
-        } else {
-            game.table.add(card)
-        }
-    } else {
-        game.table.add(card)
-    }
-
-    // Switch turn
-    game.turn = if (player == game.player1) game.player2 else game.player1
-
-    // Round end detection
-    if (game.p1Hand.isEmpty() && game.p2Hand.isEmpty()) {
-        if (game.deck.isNotEmpty()) {
-            repeat(6) { if (game.deck.isNotEmpty()) game.p1Hand.add(game.deck.removeAt(0)) }
-            repeat(6) { if (game.deck.isNotEmpty()) game.p2Hand.add(game.deck.removeAt(0)) }
-        } else {
-            // Game end
-            game.status = "FINISHED"
 suspend fun checkAndExpireDuels(duelsColl: MongoCollection<Document>, statsColl: MongoCollection<Document>, user: String) {
     val dayAgo = Date(System.currentTimeMillis() - (24 * 60 * 60 * 1000))
     val expired = duelsColl.find(Filters.and(
