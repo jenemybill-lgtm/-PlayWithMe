@@ -946,12 +946,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val listType = object : TypeToken<List<Map<String, Any>>>() {}.type
                 val newQuestions: List<Map<String, Any>> = gson.fromJson(msg.content, listType)
 
-                // 1. Reset: Delete all categorized collections and suggested_questions
+                // 1. Reset: Delete all categorized collections (KEEP suggested_questions intact)
                 ALL_CATEGORIES.forEach { cat ->
                     val coll = getQuestionsCollection(cat)
                     runBlocking { coll.deleteMany(Document()) }
                 }
-                runBlocking { database.getCollection<Document>("suggested_questions").deleteMany(Document()) }
 
                 // 2. Delete the legacy "local" folder (if it refers to a collection named "local")
                 try {
@@ -1227,7 +1226,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
             } else {
                 val pendingCursor = database.getCollection<Document>("suggested_questions").find()
-                val pending = pendingCursor.toList().filter { it.getBoolean("isApproved") != true }
+                val pending = pendingCursor.toList().filter { it.get("isApproved") != true }
                 
                 val stats = mutableMapOf<String, Int>()
                 ALL_CATEGORIES.forEach { cat ->
