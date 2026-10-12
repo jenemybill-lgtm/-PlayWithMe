@@ -1209,6 +1209,16 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LEADERBOARD_DATA, "Server", gson.toJson(top)))))
         }
 
+        MessageType.USE_POWERUP -> {
+            val parts = msg.content?.split("|") ?: return
+            if (parts.getOrNull(0) == "EMOTE") {
+                val target = parts.getOrNull(1) ?: return
+                val emote = parts.getOrNull(2) ?: "😎"
+                val payload = "${msg.sender}|$emote"
+                onlineUsers[target]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.POWERUP_EFFECT, "Server", payload))))
+            }
+        }
+
         // ==================== MODERATION (ADMIN) ====================
         MessageType.GET_PENDING_QUESTIONS -> {
             if (msg.content == "CHALLENGES") {
