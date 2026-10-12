@@ -1226,7 +1226,18 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
             } else {
                 val pendingCursor = database.getCollection<Document>("suggested_questions").find()
-                val pending = pendingCursor.toList().filter { it.get("isApproved") != true }
+                val pendingList = pendingCursor.toList().filter { it.get("isApproved") != true }
+                val mappedPending = pendingList.map { doc ->
+                    mapOf(
+                        "_id" to (doc.getObjectId("_id")?.toHexString() ?: doc.get("_id")?.toString() ?: ""),
+                        "text" to (doc.getString("text") ?: ""),
+                        "options" to (doc.get("options", List::class.java) as? List<*> ?: emptyList<Any>()),
+                        "correctAnswerIndex" to (doc.getInteger("correctAnswerIndex") ?: (doc.getDouble("correctAnswerIndex")?.toInt() ?: 0)),
+                        "category" to (doc.getString("category") ?: "Άλλα"),
+                        "difficulty" to (doc.getString("difficulty") ?: "Μέτριο"),
+                        "suggestedBy" to (doc.getString("suggestedBy") ?: doc.getString("suggested_by") ?: "Αγνωστος")
+                    )
+                }
                 
                 val stats = mutableMapOf<String, Int>()
                 ALL_CATEGORIES.forEach { cat ->
@@ -1234,7 +1245,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 }
                 
                 val response = mapOf(
-                    "questions" to pending,
+                    "questions" to mappedPending,
                     "stats" to stats
                 )
                 
