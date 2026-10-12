@@ -1100,7 +1100,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             // 1. Handle Solo Submission (Direct from game)
             if (chalId == "SOLO_SUBMIT") {
                 leaderboardColl.updateOne(Filters.eq("name", sender), Updates.combine(Updates.max("maxScore", score), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-                recordMatchHistory(database, sender, "CPU", sender, "SOLO_TRIVIA", "Solo Play")
+                recordMatchHistory(database, sender, "CPU", score.toString(), "SOLO_TRIVIA", "Solo Play")
                 println("SERVER: Solo Score Submitted for $sender -> $score")
                 return
             }
@@ -1108,7 +1108,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             // 2. Handle Blitz Submission
             if (chalId == "BLITZ_SUBMIT") {
                 database.getCollection<Document>("leaderboard_blitz").updateOne(Filters.eq("name", sender), Updates.combine(Updates.max("maxScore", score), Updates.set("lastUpdate", Date())), UpdateOptions().upsert(true))
-                recordMatchHistory(database, sender, "CPU", sender, "BLITZ", "Blitz Play")
+                recordMatchHistory(database, sender, "CPU", score.toString(), "BLITZ", "Blitz Play")
                 println("SERVER: Blitz Score Submitted for $sender -> $score")
                 return
             }
