@@ -1331,11 +1331,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 println("REJECT ERROR: ${e.message}")
             }
         }
-                } catch (e: Exception) {
-                    println("REJECT ERROR: ${e.message}")
-                }
-            }
-        }
 
         // ==================== DISCOVER PLAYERS REMOVED ====================
 
