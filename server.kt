@@ -1217,8 +1217,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         .find(Filters.or(Filters.eq("sender", msg.sender), Filters.eq("receiver", msg.sender))).toList()
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
                 } else {
-                    val pending = database.getCollection<Document>("suggested_questions")
-                        .find().toList()
+                    val pendingCursor = database.getCollection<Document>("suggested_questions").find()
+                    // Filter out unapproved if needed or just return all
+                    val pending = pendingCursor.toList().filter { it.getBoolean("isApproved") != true }
                     
                     val stats = mutableMapOf<String, Int>()
                     ALL_CATEGORIES.forEach { cat ->
