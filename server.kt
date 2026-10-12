@@ -1211,124 +1211,117 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         // ==================== MODERATION (ADMIN) ====================
         MessageType.GET_PENDING_QUESTIONS -> {
-            if (ADMIN_USERS.contains(msg.sender)) {
-                if (msg.content == "CHALLENGES") {
-                    val challenges = database.getCollection<Document>("challenges")
-                        .find(Filters.or(Filters.eq("sender", msg.sender), Filters.eq("receiver", msg.sender))).toList()
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
-                } else {
-                    val pendingCursor = database.getCollection<Document>("suggested_questions").find()
-                    // Filter out unapproved if needed or just return all
-                    val pending = pendingCursor.toList().filter { it.getBoolean("isApproved") != true }
-                    
-                    val stats = mutableMapOf<String, Int>()
-                    ALL_CATEGORIES.forEach { cat ->
-                        stats[cat] = getQuestionsCollection(cat).countDocuments().toInt()
-                    }
-                    
-                    val response = mapOf(
-                        "questions" to pending,
-                        "stats" to stats
-                    )
-                    
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
-                }
-            } else if (msg.content == "CHALLENGES") {
-                // Non-admin can also see their own challenges
+            if (msg.content == "CHALLENGES") {
                 val challenges = database.getCollection<Document>("challenges")
                     .find(Filters.or(Filters.eq("sender", msg.sender), Filters.eq("receiver", msg.sender))).toList()
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
+            } else {
+                val pendingCursor = database.getCollection<Document>("suggested_questions").find()
+                val pending = pendingCursor.toList().filter { it.getBoolean("isApproved") != true }
+                
+                val stats = mutableMapOf<String, Int>()
+                ALL_CATEGORIES.forEach { cat ->
+                    stats[cat] = getQuestionsCollection(cat).countDocuments().toInt()
+                }
+                
+                val response = mapOf(
+                    "questions" to pending,
+                    "stats" to stats
+                )
+                
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
             }
         }
 
         MessageType.APPROVE_QUESTION -> {
-            if (ADMIN_USERS.contains(msg.sender)) {
-                try {
-                    val rawContent = msg.content ?: return
-                    // Robust ID extraction: Look for a 24-character hex string anywhere in the content
-                    val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
-                    val cleanId = idMatch?.value
+            try {
+                val rawContent = msg.content ?: return
+                // Robust ID extraction: Look for a 24-character hex string anywhere in the content
+                val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
+                val cleanId = idMatch?.value
 
-                    if (cleanId == null || cleanId.length != 24) {
-                        println("SERVER ERROR: Failed to extract valid 24-char hex ID from: $rawContent")
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης (Format Error)."))))
-                        return
-                    }
-
-                    val id = org.bson.types.ObjectId(cleanId)
-                    val suggestionsColl = database.getCollection<Document>("suggested_questions")
-
-                    // 1. Find the question in suggestions
-                    val questionDoc = suggestionsColl.find(Filters.eq("_id", id)).firstOrNull()
-
-                    if (questionDoc != null) {
-                        val category = questionDoc.getString("category") ?: "Άλλα"
-                        val targetColl = getQuestionsCollection(category)
-
-                        // 2. Check for duplicate text in target category
-                        val text = questionDoc.getString("text") ?: ""
-                        val existing = targetColl.find(Filters.eq("text", text)).firstOrNull()
-
-                        if (existing == null) {
-                            // 3. Move to proper collection with approved flag and SIMPLIFIED schema
-                            val approvedDoc = Document(questionDoc).apply {
-                                append("isApproved", true)
-                                append("approvedAt", Date())
-                                remove("ar")
-                                remove("en")
-                                remove("qid")
-
-                                // Simplify text if it's an object
-                                val textVal = get("text")
-                                if (textVal is Document || textVal is Map<*, *>) {
-                                    val textMap = if (textVal is Document) textVal else Document(textVal as Map<String, Any>)
-                                    append("text", textMap.getString("el") ?: "")
-                                }
-
-                                // Simplify options if it's an object
-                                val optVal = get("options")
-                                if (optVal is Document || optVal is Map<*, *>) {
-                                    val optMap = if (optVal is Document) optVal else Document(optVal as Map<String, Any>)
-                                    append("options", optMap.getList("el", String::class.java) ?: emptyList<String>())
-                                }
-                            }
-                            targetColl.insertOne(approvedDoc)
-                            println("SERVER: Question $cleanId APPROVED and moved to $category")
-                        } else {
-                            println("SERVER: Question $cleanId already exists in $category, just deleting from suggestions.")
-                        }
-
-                        // 4. Always delete from suggestions after successful process
-                        val result = suggestionsColl.deleteOne(Filters.eq("_id", id))
-                        if (result.deletedCount > 0) {
-                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
-                        }
-                    } else {
-                        println("SERVER ERROR: Question $cleanId NOT FOUND in suggestions during approval.")
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε στις προτάσεις."))))
-                    }
-                } catch (e: Exception) {
-                    println("APPROVE ERROR: ${e.message}")
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα έγκρισης: ${e.message}"))))
+                if (cleanId == null || cleanId.length != 24) {
+                    println("SERVER ERROR: Failed to extract valid 24-char hex ID from: $rawContent")
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Μη έγκυρο ID ερώτησης (Format Error)."))))
+                    return
                 }
+
+                val id = org.bson.types.ObjectId(cleanId)
+                val suggestionsColl = database.getCollection<Document>("suggested_questions")
+
+                // 1. Find the question in suggestions
+                val questionDoc = suggestionsColl.find(Filters.eq("_id", id)).firstOrNull()
+
+                if (questionDoc != null) {
+                    val category = questionDoc.getString("category") ?: "Άλλα"
+                    val targetColl = getQuestionsCollection(category)
+
+                    // 2. Check for duplicate text in target category
+                    val text = questionDoc.getString("text") ?: ""
+                    val existing = targetColl.find(Filters.eq("text", text)).firstOrNull()
+
+                    if (existing == null) {
+                        // 3. Move to proper collection with approved flag and SIMPLIFIED schema
+                        val approvedDoc = Document(questionDoc).apply {
+                            append("isApproved", true)
+                            append("approvedAt", Date())
+                            remove("ar")
+                            remove("en")
+                            remove("qid")
+
+                            // Simplify text if it's an object
+                            val textVal = get("text")
+                            if (textVal is Document || textVal is Map<*, *>) {
+                                val textMap = if (textVal is Document) textVal else Document(textVal as Map<String, Any>)
+                                append("text", textMap.getString("el") ?: "")
+                            }
+
+                            // Simplify options if it's an object
+                            val optVal = get("options")
+                            if (optVal is Document || optVal is Map<*, *>) {
+                                val optMap = if (optVal is Document) optVal else Document(optVal as Map<String, Any>)
+                                append("options", optMap.getList("el", String::class.java) ?: emptyList<String>())
+                            }
+                        }
+                        targetColl.insertOne(approvedDoc)
+                        println("SERVER: Question $cleanId APPROVED and moved to $category")
+                    } else {
+                        println("SERVER: Question $cleanId already exists in $category, just deleting from suggestions.")
+                    }
+
+                    // 4. Always delete from suggestions after successful process
+                    val result = suggestionsColl.deleteOne(Filters.eq("_id", id))
+                    if (result.deletedCount > 0) {
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "APPROVED"))))
+                    }
+                } else {
+                    println("SERVER ERROR: Question $cleanId NOT FOUND in suggestions during approval.")
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση δεν βρέθηκε στις προτάσεις."))))
+                }
+            } catch (e: Exception) {
+                println("APPROVE ERROR: ${e.message}")
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα έγκρισης: ${e.message}"))))
             }
         }
 
         MessageType.REJECT_QUESTION -> {
-            if (ADMIN_USERS.contains(msg.sender)) {
-                try {
-                    val rawContent = msg.content ?: return
-                    val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
-                    val cleanId = idMatch?.value
-                    if (cleanId != null) {
-                        val id = org.bson.types.ObjectId(cleanId)
-                        val suggestionsColl = database.getCollection<Document>("suggested_questions")
-                        val result = suggestionsColl.deleteOne(Filters.eq("_id", id))
-                        if (result.deletedCount > 0) {
-                            session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "REJECTED"))))
-                            println("SERVER: Question $cleanId REJECTED and deleted from suggestions.")
-                        }
+            try {
+                val rawContent = msg.content ?: return
+                val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
+                val cleanId = idMatch?.value
+                if (cleanId != null) {
+                    val id = org.bson.types.ObjectId(cleanId)
+                    val suggestionsColl = database.getCollection<Document>("suggested_questions")
+                    val result = suggestionsColl.deleteOne(Filters.eq("_id", id))
+                    if (result.deletedCount > 0) {
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.QUESTION_MODERATION_RESPONSE, "Server", "REJECTED"))))
+                        println("SERVER: Question $cleanId REJECTED and deleted from suggestions.")
                     }
+                }
+            } catch (e: Exception) {
+                println("REJECT ERROR: ${e.message}")
+            }
+        }
                 } catch (e: Exception) {
                     println("REJECT ERROR: ${e.message}")
                 }
