@@ -1220,36 +1220,47 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         // ==================== MODERATION (ADMIN) ====================
         MessageType.GET_PENDING_QUESTIONS -> {
-            if (msg.content == "CHALLENGES") {
-                val challenges = database.getCollection<Document>("challenges")
-                    .find(Filters.or(Filters.eq("sender", msg.sender), Filters.eq("receiver", msg.sender))).toList()
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
-            } else {
-                val pendingCursor = database.getCollection<Document>("suggested_questions").find()
-                val pendingList = pendingCursor.toList().filter { it.get("isApproved") != true }
-                val mappedPending = pendingList.map { doc ->
-                    mapOf(
-                        "_id" to (doc.getObjectId("_id")?.toHexString() ?: doc.get("_id")?.toString() ?: ""),
-                        "text" to (doc.getString("text") ?: ""),
-                        "options" to (doc.get("options", List::class.java) as? List<*> ?: emptyList<Any>()),
-                        "correctAnswerIndex" to (doc.getInteger("correctAnswerIndex") ?: (doc.getDouble("correctAnswerIndex")?.toInt() ?: 0)),
-                        "category" to (doc.getString("category") ?: "Άλλα"),
-                        "difficulty" to (doc.getString("difficulty") ?: "Μέτριο"),
-                        "suggestedBy" to (doc.getString("suggestedBy") ?: doc.getString("suggested_by") ?: "Αγνωστος")
+            try {
+                if (msg.content == "CHALLENGES") {
+                    val challenges = database.getCollection<Document>("challenges")
+                        .find(Filters.or(Filters.eq("sender", msg.sender), Filters.eq("receiver", msg.sender))).toList()
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
+                } else {
+                    val pendingCursor = database.getCollection<Document>("suggested_questions").find()
+                    val pendingList = pendingCursor.toList().filter { it.get("isApproved") != true }
+                    val mappedPending = pendingList.map { doc ->
+                        val optionsVal = doc.get("options")
+                        val optionsList = when (optionsVal) {
+                            is List<*> -> optionsVal.map { it?.toString() ?: "" }
+                            else -> emptyList<String>()
+                        }
+                        mapOf(
+                            "_id" to (doc.getObjectId("_id")?.toHexString() ?: doc.get("_id")?.toString() ?: ""),
+                            "text" to (doc.getString("text") ?: ""),
+                            "options" to optionsList,
+                            "correctAnswerIndex" to ((doc.get("correctAnswerIndex") as? Number)?.toInt() ?: 0),
+                            "category" to (doc.getString("category") ?: "Άλλα"),
+                            "difficulty" to (doc.getString("difficulty") ?: "Μέτριο"),
+                            "suggestedBy" to (doc.getString("suggestedBy") ?: doc.getString("suggested_by") ?: "Αγνωστος")
+                        )
+                    }
+                    
+                    val stats = mutableMapOf<String, Int>()
+                    ALL_CATEGORIES.forEach { cat ->
+                        stats[cat] = getQuestionsCollection(cat).countDocuments().toInt()
+                    }
+                    
+                    val response = mapOf(
+                        "questions" to mappedPending,
+                        "stats" to stats
                     )
+                    
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
                 }
-                
-                val stats = mutableMapOf<String, Int>()
-                ALL_CATEGORIES.forEach { cat ->
-                    stats[cat] = getQuestionsCollection(cat).countDocuments().toInt()
-                }
-                
-                val response = mapOf(
-                    "questions" to mappedPending,
-                    "stats" to stats
-                )
-                
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
+            } catch (e: Exception) {
+                println("GET_PENDING_QUESTIONS ERROR: ${e.message}")
+                e.printStackTrace()
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", "{\"questions\":[],\"stats\":{}}"))))
             }
         }
 
