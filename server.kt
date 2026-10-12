@@ -1046,11 +1046,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val isSoloMode = !isBlitzMode
             val limitType = if (isBlitzMode) "BLITZ" else "SOLO"
 
-            val limitError = checkChallengeLimit(usageColl, msg.sender, isBlitz = isBlitzMode, isSolo = isSoloMode)
-            if (limitError != null) {
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "${limitType}_LIMIT_REACHED"))))
-                return
-            }
+            // We remove server-side hard limits for now to rely completely on local limits and manual AD refills.
+            // This prevents desync issues and arbitrary server blocks.
+            // The client already tracks limits via LocalLimitManager and checks it before showing ad banner.
+            
+            // Still record the usage for stats, but don't block
             recordChallenge(usageColl, msg.sender, isBlitz = isBlitzMode, isSolo = isSoloMode)
 
             val parts = msg.content?.split("|")
