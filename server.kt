@@ -1009,33 +1009,46 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             try {
                 val now = System.currentTimeMillis()
                 val lastTime = lastSubmissionTime[msg.sender] ?: 0L
-                if (now - lastTime < 60000) { // Increased to 60 seconds rate limit
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Περίμενε 1 λεπτό πριν την επόμενη υποβολή!"))))
+                if (now - lastTime < 10000) { // Reduced rate limit to 10 seconds for testing
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Περίμενε 10 δευτερόλεπτα πριν την επόμενη υποβολή!"))))
                     return
                 }
 
-                val suggestion = Document.parse(msg.content)
-                val questionText = suggestion.getString("text") ?: ""
-                val options = suggestion.get("options", List::class.java) as? List<*> ?: emptyList<Any>()
+                val jsonObject = com.google.gson.JsonParser.parseString(msg.content).asJsonObject
+                val questionText = jsonObject.get("text")?.asString ?: ""
+                val optionsArray = jsonObject.getAsJsonArray("options")
+                val options = optionsArray?.map { it.asString } ?: emptyList<String>()
+                val correctIdx = jsonObject.get("correctAnswerIndex")?.asInt ?: 0
+                val category = jsonObject.get("category")?.asString ?: "Γενικές Γνώσεις"
+                val difficulty = jsonObject.get("difficulty")?.asString ?: "Μέτριο"
 
-                if (questionText.length < 10 || questionText.length > 200) {
-                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση πρέπει να είναι 10-200 χαρακτήρες."))))
+                if (questionText.length < 5 || questionText.length > 300) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση πρέπει να είναι 5-300 χαρακτήρες."))))
                     return
                 }
 
-                if (containsProfanity(questionText) || options.any { containsProfanity(it.toString()) }) {
+                if (containsProfanity(questionText) || options.any { containsProfanity(it) }) {
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η ερώτηση ή οι απαντήσεις περιέχουν απαγορευμένες λέξεις."))))
                     return
                 }
 
-                suggestion.append("suggestedBy", msg.sender)
-                suggestion.append("createdAt", Date())
-                suggestion.append("isApproved", false)
-                database.getCollection<Document>("suggested_questions").insertOne(suggestion)
+                val docToInsert = Document("text", questionText)
+                    .append("options", options)
+                    .append("correctAnswerIndex", correctIdx)
+                    .append("category", category)
+                    .append("difficulty", difficulty)
+                    .append("suggestedBy", msg.sender)
+                    .append("createdAt", Date())
+                    .append("isApproved", false)
+
+                database.getCollection<Document>("suggested_questions").insertOne(docToInsert)
                 lastSubmissionTime[msg.sender] = now
+                println("SERVER: SUGGESTED QUESTION INSERTED SUCCESSFULLY for ${msg.sender}: $questionText")
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.SUGGEST_QUESTION_RESPONSE, "Server", "OK"))))
             } catch (e: Exception) {
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα κατά την αποθήκευση."))))
+                println("SERVER ERROR (SUGGEST_QUESTION): ${e.message}")
+                e.printStackTrace()
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα κατά την αποθήκευση: ${e.message}"))))
             }
         }
 
@@ -1232,11 +1245,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         val optionsVal = doc.get("options")
                         val optionsList = when (optionsVal) {
                             is List<*> -> optionsVal.map { it?.toString() ?: "" }
+                            is Document -> optionsVal.getList("el", String::class.java) ?: emptyList<String>()
                             else -> emptyList<String>()
                         }
+                        
+                        val textVal = doc.get("text")
+                        val textStr = when (textVal) {
+                            is String -> textVal
+                            is Document -> textVal.getString("el") ?: ""
+                            else -> ""
+                        }
+
                         mapOf(
-                            "_id" to (doc.getObjectId("_id")?.toHexString() ?: doc.get("_id")?.toString() ?: ""),
-                            "text" to (doc.getString("text") ?: ""),
+                            "_id" to (doc.get("_id")?.toString() ?: ""),
+                            "text" to textStr,
                             "options" to optionsList,
                             "correctAnswerIndex" to ((doc.get("correctAnswerIndex") as? Number)?.toInt() ?: 0),
                             "category" to (doc.getString("category") ?: "Άλλα"),
