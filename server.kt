@@ -1272,14 +1272,9 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         }
                     }
                     
-                    val stats = mutableMapOf<String, Int>()
-                    ALL_CATEGORIES.forEach { cat ->
-                        stats[cat] = getQuestionsCollection(cat).countDocuments().toInt()
-                    }
-                    
                     val response = mapOf(
                         "questions" to mappedPending,
-                        "stats" to stats
+                        "stats" to emptyMap<String, Int>()
                     )
                     
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(response)))))
