@@ -1241,30 +1241,35 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 } else {
                     val pendingCursor = database.getCollection<Document>("suggested_questions").find()
                     val pendingList = pendingCursor.toList().filter { it.get("isApproved") != true }
-                    val mappedPending = pendingList.map { doc ->
-                        val optionsVal = doc.get("options")
-                        val optionsList = when (optionsVal) {
-                            is List<*> -> optionsVal.map { it?.toString() ?: "" }
-                            is Document -> optionsVal.getList("el", String::class.java) ?: emptyList<String>()
-                            else -> emptyList<String>()
-                        }
-                        
-                        val textVal = doc.get("text")
-                        val textStr = when (textVal) {
-                            is String -> textVal
-                            is Document -> textVal.getString("el") ?: ""
-                            else -> ""
-                        }
+                    val mappedPending = pendingList.mapNotNull { doc ->
+                        try {
+                            val optionsVal = doc.get("options")
+                            val optionsList = when (optionsVal) {
+                                is List<*> -> optionsVal.map { it?.toString() ?: "" }
+                                is Document -> optionsVal.getList("el", String::class.java) ?: emptyList<String>()
+                                else -> emptyList<String>()
+                            }
+                            
+                            val textVal = doc.get("text")
+                            val textStr = when (textVal) {
+                                is String -> textVal
+                                is Document -> textVal.getString("el") ?: ""
+                                else -> ""
+                            }
 
-                        mapOf(
-                            "_id" to (doc.get("_id")?.toString() ?: ""),
-                            "text" to textStr,
-                            "options" to optionsList,
-                            "correctAnswerIndex" to ((doc.get("correctAnswerIndex") as? Number)?.toInt() ?: 0),
-                            "category" to (doc.getString("category") ?: "Άλλα"),
-                            "difficulty" to (doc.getString("difficulty") ?: "Μέτριο"),
-                            "suggestedBy" to (doc.getString("suggestedBy") ?: doc.getString("suggested_by") ?: "Αγνωστος")
-                        )
+                            mapOf(
+                                "_id" to (doc.get("_id")?.toString() ?: ""),
+                                "text" to textStr,
+                                "options" to optionsList,
+                                "correctAnswerIndex" to ((doc.get("correctAnswerIndex") as? Number)?.toInt() ?: 0),
+                                "category" to (doc.get("category")?.toString() ?: "Άλλα"),
+                                "difficulty" to (doc.get("difficulty")?.toString() ?: "Μέτριο"),
+                                "suggestedBy" to (doc.get("suggestedBy")?.toString() ?: doc.get("suggested_by")?.toString() ?: "Αγνωστος")
+                            )
+                        } catch (ex: Exception) {
+                            println("SKIPPING CORRUPT PENDING QUESTION: ${ex.message}")
+                            null
+                        }
                     }
                     
                     val stats = mutableMapOf<String, Int>()
