@@ -1258,7 +1258,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             }
 
                             mapOf(
-                                "_id" to (doc.get("_id")?.toString() ?: ""),
+                                "_id" to (doc.getObjectId("_id")?.toHexString() ?: doc.get("_id")?.toString() ?: ""),
                                 "text" to textStr,
                                 "options" to optionsList,
                                 "correctAnswerIndex" to ((doc.get("correctAnswerIndex") as? Number)?.toInt() ?: 0),
