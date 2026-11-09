@@ -946,12 +946,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val listType = object : TypeToken<List<Map<String, Any>>>() {}.type
                 val newQuestions: List<Map<String, Any>> = gson.fromJson(msg.content, listType)
 
-                // 1. Reset: Delete all categorized collections (KEEP suggested_questions intact)
-                ALL_CATEGORIES.forEach { cat ->
-                    val coll = getQuestionsCollection(cat)
-                    runBlocking { coll.deleteMany(Document()) }
-                }
-
                 // 2. Delete the legacy "local" folder (if it refers to a collection named "local")
                 try {
                     runBlocking { database.getCollection<Document>("local").drop() }
@@ -963,23 +957,32 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
                 groupedByCat.forEach { (category, questions) ->
                     val coll = getQuestionsCollection(category)
-                    val toInsert = questions.map { q ->
-                        Document("text", q["text"]?.toString() ?: "")
-                            .append("options", q["options"] as? List<String> ?: emptyList<String>())
-                            .append("correctAnswerIndex", (q["correctAnswerIndex"] as? Double)?.toInt() ?: 0)
-                            .append("category", category)
-                            .append("difficulty", q["difficulty"]?.toString() ?: "Μέτριο")
-                            .append("isApproved", true)
-                    }
-
-                    if (toInsert.isNotEmpty()) {
-                        runBlocking { coll.insertMany(toInsert) }
-                        added += toInsert.size
+                    
+                    for (q in questions) {
+                        val text = q["text"]?.toString() ?: ""
+                        if (text.isBlank()) continue
+                        
+                        // Safely check if this EXACT question already exists in this category
+                        val exists = runBlocking {
+                            coll.find(Filters.eq("text", text)).firstOrNull() != null
+                        }
+                        
+                        if (!exists) {
+                            val doc = Document("text", text)
+                                .append("options", q["options"] as? List<String> ?: emptyList<String>())
+                                .append("correctAnswerIndex", (q["correctAnswerIndex"] as? Double)?.toInt() ?: 0)
+                                .append("category", category)
+                                .append("difficulty", q["difficulty"]?.toString() ?: "Μέτριο")
+                                .append("isApproved", true)
+                            
+                            runBlocking { coll.insertOne(doc) }
+                            added++
+                        }
                     }
                 }
 
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η βάση δεδομένων αντικαταστάθηκε επιτυχώς με $added ερωτήσεις!"))))
-                println("SERVER: DATABASE RESET AND OVERWRITTEN by ${msg.sender} -> Total: $added")
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Συγχρονισμός ολοκληρώθηκε! Προστέθηκαν $added ΝΕΕΣ ερωτήσεις!"))))
+                println("SERVER: DATABASE SYNCED by ${msg.sender} -> Added $added NEW questions.")
             } catch (e: Exception) {
                 println("SERVER ERROR (bulk reset): ${e.message}")
                 session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αποτυχία επαναφοράς: ${e.message}"))))
