@@ -91,7 +91,7 @@ data class Player(
     var isEliminated: Boolean = false,
     var totalTime: Long = 0
 )
-data class FriendInfo(val name: String, var isOnline: Boolean)
+data class FriendInfo(val name: String, var isOnline: Boolean, val wins: Int = 0, val losses: Int = 0, val draws: Int = 0)
 data class RequestLists(val incoming: List<String>, val outgoing: List<String>)
 
 // --- CARD GAMES ---
@@ -1821,7 +1821,28 @@ suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession)
     val friendsDoc = database.getCollection<Document>("friends").find(Filters.eq("_id", user)).firstOrNull()
     val friendsList = (friendsDoc?.get("friends") as? List<*>)?.map { it.toString() } ?: emptyList()
 
-    val friends = friendsList.map { FriendInfo(it, onlineUsers.containsKey(it)) }
+    val matchHistoryColl = database.getCollection<Document>("match_history")
+
+    val friends = friendsList.map { friendName -> 
+        // Calculate PvP stats against this specific friend
+        val historyCursor = matchHistoryColl.find(Filters.or(
+            Filters.and(Filters.eq("player1", user), Filters.eq("player2", friendName)),
+            Filters.and(Filters.eq("player1", friendName), Filters.eq("player2", user))
+        ))
+        
+        var wins = 0
+        var losses = 0
+        var draws = 0
+        
+        historyCursor.forEach { match ->
+            val winner = match.getString("winner") ?: ""
+            if (winner == user) wins++
+            else if (winner == friendName) losses++
+            else if (winner.isBlank()) draws++
+        }
+        
+        FriendInfo(friendName, onlineUsers.containsKey(friendName), wins, losses, draws) 
+    }
     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.FRIEND_LIST, "Server", gson.toJson(friends)))))
 }
 
