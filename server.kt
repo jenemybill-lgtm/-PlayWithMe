@@ -1210,17 +1210,36 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 else -> database.getCollection<Document>("leaderboard_${mode.lowercase()}")
             }
 
-            val sortField = if (mode == "SOLO" || mode == "SOLO_TRIVIA" || mode == "BLITZ") "maxScore" else "wins"
-
-            val top = targetColl.find().sort(Sorts.descending(sortField)).limit(50).toList()
-                .map {
-                    if (sortField == "wins") {
-                        mapOf("name" to (it.getString("_id") ?: it.getString("name") ?: "Anon"), "score" to (it.getInteger("wins") ?: 0))
-                    } else {
-                        // Return raw maxScore
-                        mapOf("name" to (it.getString("name") ?: "Anon"), "score" to (it.getInteger("maxScore") ?: 0))
+            val isDuelRanking = mode == "TRIVIA" || mode == "DUEL" || mode != "SOLO" && mode != "SOLO_TRIVIA" && mode != "BLITZ"
+            
+            val top = if (isDuelRanking) {
+                // H2H (PvP) Ranking -> Sort by Win/Loss Ratio
+                targetColl.find().toList()
+                    .mapNotNull { doc ->
+                        val name = doc.getString("_id") ?: doc.getString("name") ?: "Anon"
+                        val w = doc.getInteger("wins") ?: 0
+                        val l = doc.getInteger("losses") ?: 0
+                        val d = doc.getInteger("draws") ?: 0
+                        val total = w + l + d
+                        
+                        if (total >= 5) {
+                            val winRate = (w.toDouble() / total.toDouble()) * 100
+                            mapOf("name" to name, "score" to winRate.toInt(), "total" to total)
+                        } else {
+                            null // Exclude players with less than 5 matches to prevent 1-0 anomalies
+                        }
                     }
-                }
+                    .sortedByDescending { it["score"] as Int } // Sort by Win Rate %
+                    .take(50)
+                    .map { mapOf("name" to it["name"], "score" to it["score"]) } // Strip extra properties for client compatibility
+            } else {
+                // Solo/Blitz Ranking -> Sort by MaxScore
+                targetColl.find().sort(Sorts.descending("maxScore")).limit(50).toList()
+                    .map { doc ->
+                        mapOf("name" to (doc.getString("name") ?: doc.getString("_id") ?: "Anon"), "score" to (doc.getInteger("maxScore") ?: 0))
+                    }
+            }
+            
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LEADERBOARD_DATA, "Server", gson.toJson(top)))))
         }
 
