@@ -1867,20 +1867,24 @@ suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession)
 
     val friends = friendsList.map { friendName -> 
         // Calculate PvP stats against this specific friend
-        val historyCursor = matchHistoryColl.find(Filters.or(
+        val historyList = matchHistoryColl.find(Filters.or(
             Filters.and(Filters.eq("player1", user), Filters.eq("player2", friendName)),
             Filters.and(Filters.eq("player1", friendName), Filters.eq("player2", user))
-        ))
+        )).toList()
         
         var wins = 0
         var losses = 0
         var draws = 0
         
-        historyCursor.forEach { match ->
+        historyList.forEach { match ->
             val winner = match.getString("winner") ?: ""
-            if (winner == user) wins++
-            else if (winner == friendName) losses++
-            else if (winner.isBlank()) draws++
+            if (winner == user) {
+                wins++
+            } else if (winner == friendName) {
+                losses++
+            } else if (winner.isBlank()) {
+                draws++
+            }
         }
         
         FriendInfo(friendName, onlineUsers.containsKey(friendName), wins, losses, draws) 
