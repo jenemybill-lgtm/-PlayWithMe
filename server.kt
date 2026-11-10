@@ -1613,21 +1613,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     val isLive = duel.getBoolean("isLive") ?: false
                     
                     if (isP1) {
-                        // Player 1 always sets their questions
-                        updates.add(Updates.set("questions", incomingQuestions))
-                        updates.add(Updates.set("p1_questions", incomingQuestions))
+                        // Player 1 sets their 5 questions
+                        updates.add(Updates.set("p1_questions", incomingQuestions.take(5)))
+                        if (!isLive) {
+                            // Async P1: Complement P1's 5 questions with 5 fallback Medium/Hard questions
+                            val fallback5 = fetchQuestions(5, listOf("Όλες"), listOf("Μέτριο", "Δύσκολο"))
+                            val p1TenQuestions = incomingQuestions.take(5) + fallback5
+                            updates.add(Updates.set("questions", p1TenQuestions))
+                        }
                     } else {
                         // Player 2 is sending questions
+                        updates.add(Updates.set("p2_questions", incomingQuestions.take(5)))
                         if (isLive) {
-                            // Live Duel: Blend P1 and P2 questions perfectly
+                            // Live Duel: Blend P1's 5 and P2's 5 questions into 10 total
                             val p1Questions = duel.get("p1_questions", List::class.java) as? List<Document> ?: emptyList()
-                            val blendedQuestions = mutableListOf<Document>()
-                            blendedQuestions.addAll(p1Questions.take(5))
-                            blendedQuestions.addAll(incomingQuestions.take(5))
-                            updates.add(Updates.set("questions", blendedQuestions.shuffled()))
-                        } else {
-                            // Async Duel: Ignore P2 questions. Force P2 to play P1's exact questions
-                            // We do NOT update the "questions" array here.
+                            val blendedQuestions = (p1Questions.take(5) + incomingQuestions.take(5)).shuffled()
+                            updates.add(Updates.set("questions", blendedQuestions))
                         }
                     }
                 }
@@ -1639,8 +1640,18 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             if (gameType == "TRIVIA") {
                 val isLive = updated.getBoolean("isLive") ?: false
-                val questionsList = updated.get("questions", List::class.java) as? List<Document> ?: emptyList()
-                val questionsJson = if (!isLive && !isP1) gson.toJson(questionsList) else (parts.getOrNull(2) ?: gson.toJson(questionsList))
+                
+                val questionsJson = if (!isLive && !isP1) {
+                    // Async P2: Play P2's 5 questions FIRST, followed immediately by P1's 5 questions!
+                    val p1Questions = updated.get("p1_questions", List::class.java) as? List<Document> ?: emptyList()
+                    val p2Questions = updated.get("p2_questions", List::class.java) as? List<Document> ?: emptyList()
+                    val p2TenQuestions = p2Questions.take(5) + p1Questions.take(5)
+                    gson.toJson(p2TenQuestions)
+                } else {
+                    val questionsList = updated.get("questions", List::class.java) as? List<Document> ?: emptyList()
+                    gson.toJson(questionsList)
+                }
+
                 val setupData = mapOf("timer" to 20, "questions" to questionsJson, "duelId" to duelId)
                 val startMsg = gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(setupData)))
 
