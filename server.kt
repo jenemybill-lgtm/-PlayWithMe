@@ -1222,16 +1222,19 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         val d = doc.getInteger("draws") ?: 0
                         val total = w + l + d
                         
-                        if (total >= 5) {
-                            val winRate = (w.toDouble() / total.toDouble()) * 100
-                            mapOf("name" to name, "score" to winRate.toInt(), "total" to total)
+                        if (total > 0) {
+                            val winRate = ((w.toDouble() / total.toDouble()) * 100).toInt()
+                            mapOf(
+                                "name" to name,
+                                "score" to winRate,
+                                "subtitle" to "W: $w | L: $l"
+                            )
                         } else {
-                            null // Exclude players with less than 5 matches to prevent 1-0 anomalies
+                            null
                         }
                     }
                     .sortedByDescending { it["score"] as Int } // Sort by Win Rate %
                     .take(50)
-                    .map { mapOf("name" to it["name"], "score" to it["score"]) } // Strip extra properties for client compatibility
             } else {
                 // Solo/Blitz Ranking -> Sort by MaxScore
                 targetColl.find().sort(Sorts.descending("maxScore")).limit(50).toList()
