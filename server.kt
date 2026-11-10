@@ -1500,19 +1500,19 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
                 duelsColl.insertOne(duelDoc)
 
-                val responseStr = "$duelId|$host|$target|${!isLive}|$gameType"
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
-
                 if (isLive) {
-                    val challengeStr = "$host|$isLive|$gameType"
                     val targetSession = onlineUsers[target]
-                    if (targetSession != null) {
-                        targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_CHALLENGE_RECEIVED, "Server", challengeStr))))
+                    if (targetSession == null) {
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Ο παίκτης $target είναι offline! Δεν μπορείς να παίξεις Live Duel."))))
                     } else {
-                        pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
+                        val challengeStr = "$host|$isLive|$gameType"
+                        targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_CHALLENGE_RECEIVED, "Server", challengeStr))))
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Η πρόκληση στάλθηκε στον $target! Αναμονή για αποδοχή..."))))
                     }
+                } else {
+                    val responseStr = "$duelId|$host|$target|true|$gameType"
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))))
                 }
-                // If NOT live (Async), we don't notify target yet! They get notified after p1 finishes.
             }
         }
 
