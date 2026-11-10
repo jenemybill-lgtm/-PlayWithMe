@@ -1203,6 +1203,44 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val mode = msg.content ?: "SOLO"
             println("SERVER: Leaderboard request for mode: $mode")
 
+            if (mode == "FRIENDS") {
+                val user = msg.sender
+                val friendsDoc = database.getCollection<Document>("friends").find(Filters.eq("_id", user)).firstOrNull()
+                val friendsList = (friendsDoc?.get("friends") as? List<*>)?.map { it.toString() } ?: emptyList()
+                val matchHistoryColl = database.getCollection<Document>("match_history")
+
+                val top = friendsList.map { friendName ->
+                    val historyList = matchHistoryColl.find(Filters.or(
+                        Filters.and(Filters.eq("player1", user), Filters.eq("player2", friendName)),
+                        Filters.and(Filters.eq("player1", friendName), Filters.eq("player2", user))
+                    )).toList()
+
+                    var wins = 0
+                    var losses = 0
+                    var draws = 0
+
+                    historyList.forEach { match ->
+                        val winner = match.getString("winner") ?: ""
+                        if (winner == user) {
+                            wins++
+                        } else if (winner == friendName) {
+                            losses++
+                        } else if (winner.isBlank()) {
+                            draws++
+                        }
+                    }
+
+                    mapOf(
+                        "name" to friendName,
+                        "score" to wins,
+                        "subtitle" to "W: $wins | L: $losses"
+                    )
+                }.sortedByDescending { (it["score"] as? Int) ?: 0 }
+
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LEADERBOARD_DATA, "Server", gson.toJson(top)))))
+                return
+            }
+
             val targetColl = when(mode) {
                 "BLITZ" -> database.getCollection<Document>("leaderboard_blitz")
                 "SOLO", "SOLO_TRIVIA" -> database.getCollection<Document>("leaderboard_solo")
