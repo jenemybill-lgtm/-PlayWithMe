@@ -1565,19 +1565,30 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             // Find the pending duel
             val duel = duelsColl.find(Filters.and(
-                Filters.eq("player1", host),
-                Filters.eq("player2", acceptor),
+                Filters.or(
+                    Filters.and(Filters.eq("player1", host), Filters.eq("player2", acceptor)),
+                    Filters.and(Filters.eq("player1", acceptor), Filters.eq("player2", host))
+                ),
                 Filters.eq("status", "SETUP")
             )).firstOrNull() ?: return
 
             val duelId = duel.getString("_id")
             val isLive = duel.getBoolean("isLive") ?: false
             val gameType = duel.getString("gameType") ?: "TRIVIA"
+            val p1Finished = duel.getBoolean("p1_finished") ?: false
 
-            val responseStr = "$duelId|$host|$acceptor|${!isLive}|$gameType"
-            val setupMsg = gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))
-            session.send(Frame.Text(setupMsg))
-            onlineUsers[host]?.send(Frame.Text(setupMsg))
+            if (!isLive && p1Finished) {
+                // Async duel where P1 already finished -> launch game directly for P2 (acceptor)
+                val questionsList = duel.get("questions", List::class.java) as? List<Document> ?: emptyList()
+                val setupData = mapOf("timer" to 20, "questions" to gson.toJson(questionsList), "duelId" to duelId)
+                val startMsg = gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(setupData)))
+                session.send(Frame.Text(startMsg))
+            } else {
+                val responseStr = "$duelId|$host|$acceptor|${!isLive}|$gameType"
+                val setupMsg = gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", responseStr))
+                session.send(Frame.Text(setupMsg))
+                onlineUsers[host]?.send(Frame.Text(setupMsg))
+            }
         }
 
         MessageType.DUEL_START -> {
@@ -1629,8 +1640,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (gameType == "TRIVIA") {
                 val isLive = updated.getBoolean("isLive") ?: false
                 val questionsList = updated.get("questions", List::class.java) as? List<Document> ?: emptyList()
-                val questionsJson = parts.getOrNull(2) ?: gson.toJson(questionsList)
-                val setupData = mapOf("timer" to 20, "questions" to questionsJson)
+                val questionsJson = if (!isLive && !isP1) gson.toJson(questionsList) else (parts.getOrNull(2) ?: gson.toJson(questionsList))
+                val setupData = mapOf("timer" to 20, "questions" to questionsJson, "duelId" to duelId)
                 val startMsg = gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(setupData)))
 
                 if (!isLive) {
