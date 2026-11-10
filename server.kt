@@ -1536,9 +1536,29 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             if (gameType == "TRIVIA") {
                 updates.add(Updates.set(if (isP1) "p1_cats" else "p2_cats", parts.getOrNull(1) ?: ""))
+                
                 if (parts.size >= 3 && parts[2].isNotBlank() && parts[2] != "null") {
-                    val qList: List<Document> = gson.fromJson(parts[2], object : TypeToken<List<Document>>() {}.type)
-                    updates.add(Updates.set("questions", qList))
+                    val incomingQuestions: List<Document> = gson.fromJson(parts[2], object : TypeToken<List<Document>>() {}.type)
+                    val isLive = duel.getBoolean("isLive") ?: false
+                    
+                    if (isP1) {
+                        // Player 1 always sets their questions
+                        updates.add(Updates.set("questions", incomingQuestions))
+                        updates.add(Updates.set("p1_questions", incomingQuestions))
+                    } else {
+                        // Player 2 is sending questions
+                        if (isLive) {
+                            // Live Duel: Blend P1 and P2 questions perfectly
+                            val p1Questions = duel.get("p1_questions", List::class.java) as? List<Document> ?: emptyList()
+                            val blendedQuestions = mutableListOf<Document>()
+                            blendedQuestions.addAll(p1Questions.take(5))
+                            blendedQuestions.addAll(incomingQuestions.take(5))
+                            updates.add(Updates.set("questions", blendedQuestions.shuffled()))
+                        } else {
+                            // Async Duel: Ignore P2 questions. Force P2 to play P1's exact questions
+                            // We do NOT update the "questions" array here.
+                        }
+                    }
                 }
             }
 
