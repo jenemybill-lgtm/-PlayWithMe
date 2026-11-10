@@ -1776,9 +1776,43 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 .limit(20)
                 .toList()
 
+            // Fetch in-progress / pending duels for this user
+            val pendingDocs = duelsColl.find(Filters.and(
+                Filters.eq("status", "SETUP"),
+                Filters.or(Filters.eq("player1", user), Filters.eq("player2", user))
+            )).toList().mapNotNull { doc ->
+                val p1 = doc.getString("player1") ?: ""
+                val p2 = doc.getString("player2") ?: ""
+                val isP1 = user == p1
+                val opponent = if (isP1) p2 else p1
+                val isLive = doc.getBoolean("isLive") ?: false
+                val p1Finished = doc.getBoolean("p1_finished") ?: false
+                val p2Finished = doc.getBoolean("p2_finished") ?: false
+                val gType = doc.getString("gameType") ?: "TRIVIA"
+
+                val statusType = when {
+                    isP1 && !p1Finished -> "MY_TURN_TO_PLAY"
+                    isP1 && p1Finished && !p2Finished -> "WAITING_OPPONENT"
+                    !isP1 && !p2Finished -> "MY_TURN_TO_PLAY"
+                    else -> null
+                }
+
+                if (statusType != null) {
+                    mapOf(
+                        "duelId" to (doc.getString("_id") ?: ""),
+                        "opponent" to opponent,
+                        "isLive" to isLive,
+                        "statusType" to statusType,
+                        "p1Score" to (doc.getInteger("p1_score") ?: 0),
+                        "gameType" to gType
+                    )
+                } else null
+            }
+
             val response = mapOf(
                 "stats" to (userStats ?: Document("_id", user).append("wins", 0).append("losses", 0).append("draws", 0)),
-                "history" to matchHistory
+                "history" to matchHistory,
+                "pending" to pendingDocs
             )
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_HISTORY_DATA, "Server", gson.toJson(response)))))
         }
