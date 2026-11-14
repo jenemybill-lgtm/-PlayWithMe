@@ -1616,10 +1616,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         // Player 1 sets their 5 questions
                         updates.add(Updates.set("p1_questions", incomingQuestions.take(5)))
                         if (!isLive) {
-                            // Async P1: Complement P1's 5 questions with 5 fallback Medium/Hard questions
-                            val fallback5 = fetchQuestions(5, listOf("Όλες"), listOf("Μέτριο", "Δύσκολο"))
-                            val p1TenQuestions = incomingQuestions.take(5) + fallback5
-                            updates.add(Updates.set("questions", p1TenQuestions))
+                            // Async P1: Only play P1's 5 questions in Phase 1 (1/5 to 5/5)
+                            updates.add(Updates.set("questions", incomingQuestions.take(5)))
                         }
                     } else {
                         // Player 2 is sending questions
