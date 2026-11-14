@@ -1764,7 +1764,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 recordMatchHistory(database, p1, p2, winner, gType)
                 updateDuelStats(database, p1, p2, winner, gType)
 
-                val resultMsg = if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"
+                val resultMsg = "$winner|$p1|$s1|${10 - s1}|$p2|$s2|${10 - s2}"
                 onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
                 onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
             }
