@@ -1777,6 +1777,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.DUEL_HISTORY_REQUEST -> {
             val user = msg.sender
             val gameType = msg.content // Could be null for "ALL"
+            val userRegex = "^${Pattern.quote(user)}$"
 
             val statsColl = when(gameType) {
                 null, "ALL", "TRIVIA", "DUEL" -> database.getCollection<Document>("leaderboard_trivia")
@@ -1785,14 +1786,22 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 else -> database.getCollection<Document>("leaderboard_${gameType.lowercase()}")
             }
 
-            val userStats = statsColl.find(Filters.or(Filters.eq("_id", user), Filters.eq("name", user))).firstOrNull()
+            val userStats = statsColl.find(Filters.or(
+                Filters.regex("_id", userRegex, "i"),
+                Filters.regex("name", userRegex, "i")
+            )).firstOrNull()
             
+            val userFilter = Filters.or(
+                Filters.regex("player1", userRegex, "i"),
+                Filters.regex("player2", userRegex, "i")
+            )
+
             val historyFilter = if (gameType == null || gameType == "ALL") {
-                Filters.or(Filters.eq("player1", user), Filters.eq("player2", user))
+                userFilter
             } else {
                 Filters.and(
                     Filters.eq("gameType", gameType),
-                    Filters.or(Filters.eq("player1", user), Filters.eq("player2", user))
+                    userFilter
                 )
             }
             
