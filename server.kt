@@ -1769,8 +1769,21 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 updateDuelStats(database, p1, p2, winner, gType)
 
                 val resultMsg = "$winner|$p1|$s1|${10 - s1}|$p2|$s2|${10 - s2}"
-                onlineUsers[p1]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
-                onlineUsers[p2]?.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg))))
+                val resultFrame = Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg)))
+
+                val p1Session = onlineUsers[p1]
+                if (p1Session != null) {
+                    p1Session.send(resultFrame)
+                } else {
+                    pendingColl.insertOne(Document("target", p1).append("type", "DUEL_RESULT").append("content", resultMsg))
+                }
+
+                val p2Session = onlineUsers[p2]
+                if (p2Session != null) {
+                    p2Session.send(resultFrame)
+                } else {
+                    pendingColl.insertOne(Document("target", p2).append("type", "DUEL_RESULT").append("content", resultMsg))
+                }
             }
         }
 
