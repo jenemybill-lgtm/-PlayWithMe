@@ -873,6 +873,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         MessageType.START_GAME -> {
             val room = rooms.values.find { it.hostSession == session }
             if (room != null && msg.content != null) {
+                if (room.players.size < 2) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "⚠️ Χρειάζονται τουλάχιστον 2 παίκτες στο δωμάτιο για να ξεκινήσει το Ομαδικό Παιχνίδι!"))))
+                    return
+                }
+
                 room.gameJob?.cancel()
                 val setup: Map<String, Any> = gson.fromJson(msg.content, object : TypeToken<Map<String, Any>>() {}.type)
 
@@ -899,7 +904,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                     it.score = 0; it.correctCount = 0; it.wrongCount = 0; it.totalTime = 0; it.isEliminated = false
                 }
 
-                room.broadcast(GameMessage(MessageType.START_GAME, "Server", room.timerSeconds.toString()))
+                val startPayload = mapOf("timer" to room.timerSeconds, "count" to room.questions.size)
+                room.broadcast(GameMessage(MessageType.START_GAME, "Server", gson.toJson(startPayload)))
                 room.gameJob = CoroutineScope(Dispatchers.Default).launch {
                     delay(3000) // Give clients time to transition
                     runGameLoop(room)
