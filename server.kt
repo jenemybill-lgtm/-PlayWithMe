@@ -14,6 +14,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.toList
 import org.bson.Document
+import java.security.MessageDigest
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -42,6 +43,15 @@ var isRedisActive = try { redisPool.resource.use { it.ping() == "PONG" } } catch
 
 val ADMIN_USERS = setOf("jenemybill", "admin", "basil")
 val lastSubmissionTime = ConcurrentHashMap<String, Long>()
+val serverScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+fun isAdmin(username: String): Boolean = username.trim().lowercase(Locale.ROOT) in ADMIN_USERS
+
+fun hashPassword(password: String): String {
+    if (password.isEmpty()) return ""
+    val bytes = MessageDigest.getInstance("SHA-256").digest(password.toByteArray(Charsets.UTF_8))
+    return bytes.joinToString("") { "%02x".format(it) }
+}
 
 fun containsProfanity(text: String): Boolean {
     val profanities = listOf(
@@ -76,7 +86,7 @@ enum class MessageType {
     USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS,
     DUEL_CHALLENGE, DUEL_CHALLENGE_RECEIVED, DUEL_ACCEPT, DUEL_SETUP, DUEL_START, DUEL_FINISH, DUEL_RESULT, DUEL_HISTORY_REQUEST, DUEL_HISTORY_DATA,
     REMOVE_FRIEND, ROOM_PLAYERS_UPDATE, CANCEL_MATCHMAKING, RESET_CHALLENGE_LIMIT, WAKE_UP, READY,
-    CARD_GAME_MOVE, CARD_GAME_STATE, BOARD_GAME_MOVE, BOARD_GAME_STATE, PVE_RESULT
+    PVE_RESULT
 }
 
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
@@ -94,212 +104,8 @@ data class Player(
 data class FriendInfo(val name: String, var isOnline: Boolean, val wins: Int = 0, val losses: Int = 0, val draws: Int = 0)
 data class RequestLists(val incoming: List<String>, val outgoing: List<String>)
 
-// --- CARD GAMES ---
-data class Card(val suit: String, val rank: String, val id: String)
-
-// --- COLOR-X (UNO-like) ---
-data class UnoCard(val color: String, val value: String, val id: String)
-data class UnoGameState(
-    val player1: String,
-    val player2: String,
-    val p1Hand: MutableList<UnoCard> = mutableListOf(),
-    val p2Hand: MutableList<UnoCard> = mutableListOf(),
-    val discardPile: MutableList<UnoCard> = mutableListOf(),
-    val drawDeck: MutableList<UnoCard> = mutableListOf(),
-    var turn: String = "",
-    var currentSuit: String = "", // Current color to match
-    var currentValue: String = "", // Current number/action to match
-    var direction: Int = 1, // 1 or -1
-    var status: String = "ACTIVE",
-    var lastPlayedCard: UnoCard? = null
-)
-
-val unoGames = ConcurrentHashMap<String, UnoGameState>()
-
-fun createUnoDeck(): MutableList<UnoCard> {
-    val colors = listOf("RED", "BLUE", "GREEN", "YELLOW")
-    val values = (0..9).map { it.toString() } + listOf("SKIP", "REVERSE", "DRAW2")
-    val deck = mutableListOf<UnoCard>()
-
-    for (c in colors) {
-        for (v in values) {
-            deck.add(UnoCard(c, v, "${c}_${v}_1"))
-            if (v != "0") deck.add(UnoCard(c, v, "${c}_${v}_2")) // Two of each except 0
-        }
-    }
-    // Wild cards
-    repeat(4) {
-        deck.add(UnoCard("WILD", "COLOR", "WILD_$it"))
-        deck.add(UnoCard("WILD", "DRAW4", "WILD_D4_$it"))
-    }
-    deck.shuffle()
-    return deck
-}
-
-fun broadcastUnoState(gameId: String, game: UnoGameState) {
-    val stateJson = gson.toJson(game)
-    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "UNO|$stateJson")))) } }
-    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "UNO|$stateJson")))) } }
-}
-
-data class XeriGameState(
-    val player1: String,
-    val player2: String,
-    val p1Hand: MutableList<Card> = mutableListOf(),
-    val p2Hand: MutableList<Card> = mutableListOf(),
-    val table: MutableList<Card> = mutableListOf(),
-    val deck: MutableList<Card> = mutableListOf(),
-    var turn: String = "",
-    var p1Points: Int = 0,
-    var p2Points: Int = 0,
-    var p1CardsTaken: Int = 0,
-    var p2CardsTaken: Int = 0,
-    var lastToTake: String = "",
-    var status: String = "ACTIVE",
-    var lastPlayedCard: Card? = null
-)
-
-val cardGames = ConcurrentHashMap<String, XeriGameState>()
-
-fun createDeck(): MutableList<Card> {
-    val suits = listOf("♠️", "♥️", "♦️", "♣️")
-    val ranks = listOf("A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K")
-    val deck = mutableListOf<Card>()
-    for (s in suits) {
-        for (r in ranks) {
-            deck.add(Card(s, r, "${r}_${s}"))
-        }
-    }
-    deck.shuffle()
-    return deck
-}
-
-fun calculateCardPoints(card: Card): Int {
-    if (card.rank == "A" || card.rank == "J") return 1
-    if (card.rank == "10" && card.suit == "♦️") return 2
-    if (card.rank == "2" && card.suit == "♠️") return 1
-    return 0
-}
-
-fun broadcastCardState(gameId: String, game: XeriGameState) {
-    val stateJson = gson.toJson(game)
-    val msg = gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "XERI|$stateJson"))
-    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(msg)) } }
-    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(msg)) } }
-}
-
-// --- AGONIA ---
-data class AgoniaGameState(
-    val player1: String,
-    val player2: String,
-    val p1Hand: MutableList<Card> = mutableListOf(),
-    val p2Hand: MutableList<Card> = mutableListOf(),
-    val discardPile: MutableList<Card> = mutableListOf(),
-    val deck: MutableList<Card> = mutableListOf(),
-    var turn: String = "",
-    var currentSuit: String = "",
-    var currentValue: String = "",
-    var status: String = "ACTIVE",
-    var lastPlayedCard: Card? = null
-)
-val agoniaGames = ConcurrentHashMap<String, AgoniaGameState>()
-
-fun broadcastAgoniaState(gameId: String, game: AgoniaGameState) {
-    val stateJson = gson.toJson(game)
-    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "AGONIA|$stateJson")))) } }
-    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "AGONIA|$stateJson")))) } }
-}
-
-// --- DILOTI ---
-data class DeclarationGroup(val cards: List<Card>, val value: Int, val owner: String)
-data class DilotiGameState(
-    val player1: String,
-    val player2: String,
-    val p1Hand: MutableList<Card> = mutableListOf(),
-    val p2Hand: MutableList<Card> = mutableListOf(),
-    val tableFree: MutableList<Card> = mutableListOf(),
-    val declarations: MutableList<DeclarationGroup> = mutableListOf(),
-    val deck: MutableList<Card> = mutableListOf(),
-    var turn: String = "",
-    var p1Points: Int = 0,
-    var p2Points: Int = 0,
-    var p1CardsTaken: Int = 0,
-    var p2CardsTaken: Int = 0,
-    var p1XeriCount: Int = 0,
-    var p2XeriCount: Int = 0,
-    var lastToTake: String = "",
-    var status: String = "ACTIVE",
-    var lastPlayedCard: Card? = null
-)
-val dilotiGames = ConcurrentHashMap<String, DilotiGameState>()
-
-fun broadcastDilotiState(gameId: String, game: DilotiGameState) {
-    val stateJson = gson.toJson(game)
-    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "DILOTI|$stateJson")))) } }
-    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(gson.toJson(GameMessage(MessageType.CARD_GAME_STATE, "Server", "DILOTI|$stateJson")))) } }
-}
-
-fun dilotiNextTurn(gameId: String, game: DilotiGameState) {
-    if (game.p1Hand.isEmpty() && game.p2Hand.isEmpty()) {
-        if (game.deck.isNotEmpty()) {
-            repeat(6) { if (game.deck.isNotEmpty()) game.p1Hand.add(game.deck.removeAt(0)) }
-            repeat(6) { if (game.deck.isNotEmpty()) game.p2Hand.add(game.deck.removeAt(0)) }
-        } else {
-            game.status = "FINISHED"
-            val remaining = game.tableFree + game.declarations.flatMap { it.cards }
-            val pts = remaining.sumOf { calculateCardPoints(it) }
-            if (game.lastToTake == game.player1) { game.p1Points += pts; game.p1CardsTaken += remaining.size }
-            else { game.p2Points += pts; game.p2CardsTaken += remaining.size }
-            if (game.p1CardsTaken > game.p2CardsTaken) game.p1Points += 3 else if (game.p2CardsTaken > game.p1CardsTaken) game.p2Points += 3
-            val winner = if (game.p1Points > game.p2Points) game.player1 else if (game.p2Points > game.p1Points) game.player2 else ""
-            CoroutineScope(Dispatchers.IO).launch {
-                updateDuelStats(database, game.player1, game.player2, winner, "DILOTI")
-                recordMatchHistory(database, game.player1, game.player2, winner, "DILOTI")
-            }
-            val finalMsg = gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", if (winner == "") "ΙΣΟΠΑΛΙΑ!" else "ΝΙΚΗΤΗΣ: $winner!"))
-            onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
-            onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(finalMsg)) } }
-            dilotiGames.remove(gameId); return
-        }
-    }
-    game.turn = if (game.turn == game.player1) game.player2 else game.player1
-}
-
-// --- BOARD GAMES ---
-data class BoardGameState(
-    val player1: String,
-    val player2: String,
-    var gameType: String, // CHESS, BACKGAMMON, CHECKERS
-    var turn: String = "",
-    var boardJson: String = "", // Game-specific JSON
-    var status: String = "ACTIVE",
-    var lastMove: String = ""
-)
-
-data class BackgammonState(
-    val player1: String,
-    val player2: String,
-    val board: MutableList<Int> = MutableList(24) { 0 }, 
-    var dice: MutableList<Int> = mutableListOf(),
-    var turn: String = "",
-    var p1Bar: Int = 0,
-    var p2Bar: Int = 0,
-    var p1Off: Int = 0,
-    var p2Off: Int = 0,
-    var status: String = "ACTIVE"
-)
-
-val boardGames = ConcurrentHashMap<String, BoardGameState>()
-
-fun broadcastBoardState(gameId: String, game: BoardGameState) {
-    val text = gson.toJson(GameMessage(MessageType.BOARD_GAME_STATE, "Server", "${game.gameType}|${gson.toJson(game)}"))
-    onlineUsers[game.player1]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(text)) } }
-    onlineUsers[game.player2]?.let { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(text)) } }
-}
-
 val onlineUsers = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
 val duelMatchmakingQueue = ConcurrentHashMap<String, DefaultWebSocketServerSession>()
-val userLanguages = ConcurrentHashMap<String, String>() // Track preferred language for each user
 val rooms = ConcurrentHashMap<String, GameRoom>()
 val gson = Gson()
 lateinit var database: MongoDatabase
@@ -320,7 +126,7 @@ class GameRoom(val code: String, val hostSession: DefaultWebSocketServerSession)
         val text = gson.toJson(message)
         val sessions = players.map { it.session }.toMutableSet()
         sessions.add(hostSession)
-        sessions.forEach { try { CoroutineScope(Dispatchers.IO).launch { it.send(Frame.Text(text)) } } catch (e: Exception) {} }
+        sessions.forEach { try { serverScope.launch { it.send(Frame.Text(text)) } } catch (e: Exception) {} }
     }
 
     suspend fun updateHostPlayerCount() {
@@ -350,6 +156,15 @@ suspend fun initDatabase() {
         
         val friendsColl = database.getCollection<Document>("friends")
         friendsColl.createIndex(Indexes.ascending("friends"))
+
+        val historyColl = database.getCollection<Document>("match_history")
+        historyColl.createIndex(Indexes.ascending("player1", "player2"))
+        historyColl.createIndex(Indexes.ascending("player2", "player1"))
+        historyColl.createIndex(Indexes.descending("timestamp"))
+
+        val duelsColl = database.getCollection<Document>("duels")
+        duelsColl.createIndex(Indexes.ascending("player1", "status"))
+        duelsColl.createIndex(Indexes.ascending("player2", "status"))
 
         // Final Migration to Categorized Plain Greek Schema
         migrateToFinalGreekSchema()
@@ -417,7 +232,7 @@ suspend fun migrateToFinalGreekSchema() {
 }
 
 fun main() {
-    GlobalScope.launch { 
+    serverScope.launch { 
         initDatabase()
         watchDatabaseChanges()
     }
@@ -448,33 +263,38 @@ fun main() {
                 gone?.let {
                     onlineUsers.remove(it)
                     duelMatchmakingQueue.remove(it)
-                    try {
-                        redisPool.resource.use { r -> 
-                            r.srem("online_players", it)
-                            // Clean up all possible matchmaking queues
-                            listOf("TRIVIA", "XERI", "BACKGAMMON", "CHESS", "UNO", "DILOTI", "AGONIA", "CHECKERS").forEach { type ->
-                                r.lrem("matchmaking_queue_$type", 0, it)
+                    if (isRedisActive) {
+                        try {
+                            redisPool.resource.use { r -> 
+                                r.srem("online_players", it)
+                                r.lrem("matchmaking_queue_TRIVIA", 0, it)
                             }
+                        } catch (e: Exception) {
+                            println("REDIS ERROR: Failed cleanup for $it: ${e.message}")
                         }
-                    } catch (e: Exception) {
-                        println("REDIS ERROR: Failed cleanup for $it: ${e.message}")
                     }
                     notifyFriendsStatus(it, false)
                 }
 
-                rooms.entries.removeIf { entry ->
+                val disconnectedSession = this
+                val iterator = rooms.entries.iterator()
+                while (iterator.hasNext()) {
+                    val entry = iterator.next()
                     val room = entry.value
-                    val isParticipant = room.players.any { it.session == this }
-                    val isHost = room.hostSession == this
+                    val isParticipant = room.players.any { it.session == disconnectedSession }
+                    val isHost = room.hostSession == disconnectedSession
 
                     if (isParticipant || isHost) {
                         if (room.isGameRunning) {
                             room.broadcast(GameMessage(MessageType.RESTART, "Server", "Ένας παίκτης αποσυνδέθηκε."))
                         }
-                        room.players.removeIf { it.session == this }
-                        if (!isHost) runBlocking { room.updateHostPlayerCount() }
+                        room.players.removeIf { it.session == disconnectedSession }
+                        if (isHost) {
+                            iterator.remove()
+                        } else {
+                            room.updateHostPlayerCount()
+                        }
                     }
-                    isHost
                 }
             }
         }
@@ -538,7 +358,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             val userDoc = Document("name", name).append("createdAt", Date())
             if (password.isNotEmpty()) {
-                userDoc.append("password", password)
+                userDoc.append("password", hashPassword(password))
             }
             usersColl.insertOne(userDoc)
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.REGISTER_RESPONSE, "Server", "OK"))))
@@ -558,9 +378,17 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val official = userDoc.getString("name") ?: name
             val storedPassword = userDoc.getString("password") ?: ""
 
-            if (storedPassword.isNotEmpty() && storedPassword != password) {
-                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "WRONG_PASSWORD"))))
-                return
+            if (storedPassword.isNotEmpty()) {
+                val hashedInput = hashPassword(password)
+                val isMatch = storedPassword == hashedInput || storedPassword == password
+                if (!isMatch) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LOGIN_RESPONSE, "Server", "WRONG_PASSWORD"))))
+                    return
+                }
+                // Upgrade legacy plaintext password to SHA-256 hash transparently
+                if (storedPassword == password && password.isNotEmpty() && storedPassword != hashedInput) {
+                    usersColl.updateOne(Filters.eq("_id", userDoc.get("_id")), Updates.set("password", hashedInput))
+                }
             }
 
             onlineUsers[official] = session
@@ -948,20 +776,24 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
         // ==================== BULK UPLOAD QUESTIONS ====================
         MessageType.UPLOAD_QUESTIONS -> {
+            if (!isAdmin(msg.sender)) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν έχεις δικαιώματα διαχειριστή!"))))
+                return
+            }
             try {
                 val listType = object : TypeToken<List<Map<String, Any>>>() {}.type
                 val newQuestions: List<Map<String, Any>> = gson.fromJson(msg.content, listType)
 
-                // 2. Delete the legacy "local" folder (if it refers to a collection named "local")
+                // Delete the legacy "local" collection if present
                 try {
-                    runBlocking { database.getCollection<Document>("local").drop() }
+                    database.getCollection<Document>("local").drop()
                 } catch (e: Exception) {}
 
                 var added = 0
                 // Group questions by category for batch insertion
                 val groupedByCat = newQuestions.filter { it.containsKey("text") }.groupBy { it["category"]?.toString() ?: "Άλλα" }
 
-                groupedByCat.forEach { (category, questions) ->
+                for ((category, questions) in groupedByCat) {
                     val coll = getQuestionsCollection(category)
                     
                     for (q in questions) {
@@ -969,9 +801,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         if (text.isBlank()) continue
                         
                         // Safely check if this EXACT question already exists in this category
-                        val exists = runBlocking {
-                            coll.find(Filters.eq("text", text)).firstOrNull() != null
-                        }
+                        val exists = coll.find(Filters.eq("text", text)).firstOrNull() != null
                         
                         if (!exists) {
                             val doc = Document("text", text)
@@ -981,7 +811,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                                 .append("difficulty", q["difficulty"]?.toString() ?: "Μέτριο")
                                 .append("isApproved", true)
                             
-                            runBlocking { coll.insertOne(doc) }
+                            coll.insertOne(doc)
                             added++
                         }
                     }
@@ -1080,15 +910,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val allSoloQuestions = mutableListOf<Document>()
             val diffCounts = mapOf("Εύκολο" to 15, "Μέτριο" to 45, "Δύσκολο" to 40)
 
-            diffCounts.forEach { (diff, targetCount) ->
+            for ((diff, targetCount) in diffCounts) {
                 val collected = mutableListOf<Document>()
                 val shuffledCats = ALL_CATEGORIES.shuffled(if (seedValue != null) Random(seedValue.hashCode().toLong()) else Random())
 
                 for (cat in shuffledCats) {
                     if (collected.size >= targetCount) break
-                    val fromCat = runBlocking {
-                        getQuestionsCollection(cat).find(Filters.eq("difficulty", diff)).toList()
-                    }
+                    val fromCat = getQuestionsCollection(cat).find(Filters.eq("difficulty", diff)).toList()
                     collected.addAll(fromCat)
                 }
 
@@ -1213,26 +1041,29 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 val user = msg.sender
                 val friendsDoc = database.getCollection<Document>("friends").find(Filters.eq("_id", user)).firstOrNull()
                 val friendsList = (friendsDoc?.get("friends") as? List<*>)?.map { it.toString() } ?: emptyList()
+
+                if (friendsList.isEmpty()) {
+                    session.send(Frame.Text(gson.toJson(GameMessage(MessageType.LEADERBOARD_DATA, "Server", "[]"))))
+                    return
+                }
+
                 val matchHistoryColl = database.getCollection<Document>("match_history")
+                val allMatches = matchHistoryColl.find(Filters.or(
+                    Filters.and(Filters.eq("player1", user), Filters.`in`("player2", friendsList)),
+                    Filters.and(Filters.`in`("player1", friendsList), Filters.eq("player2", user))
+                )).toList()
 
                 val top = friendsList.map { friendName ->
-                    val historyList = matchHistoryColl.find(Filters.or(
-                        Filters.and(Filters.eq("player1", user), Filters.eq("player2", friendName)),
-                        Filters.and(Filters.eq("player1", friendName), Filters.eq("player2", user))
-                    )).toList()
-
                     var wins = 0
                     var losses = 0
-                    var draws = 0
 
-                    historyList.forEach { match ->
-                        val winner = match.getString("winner") ?: ""
-                        if (winner == user) {
-                            wins++
-                        } else if (winner == friendName) {
-                            losses++
-                        } else if (winner.isBlank()) {
-                            draws++
+                    allMatches.forEach { match ->
+                        val p1 = match.getString("player1")
+                        val p2 = match.getString("player2")
+                        if ((p1 == user && p2 == friendName) || (p1 == friendName && p2 == user)) {
+                            val winner = match.getString("winner") ?: ""
+                            if (winner == user) wins++
+                            else if (winner == friendName) losses++
                         }
                     }
 
@@ -1308,6 +1139,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         .find(Filters.or(Filters.eq("sender", msg.sender), Filters.eq("receiver", msg.sender))).toList()
                     session.send(Frame.Text(gson.toJson(GameMessage(MessageType.PENDING_QUESTIONS_DATA, "Server", gson.toJson(challenges)))))
                 } else {
+                    if (!isAdmin(msg.sender)) {
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν έχεις δικαιώματα διαχειριστή!"))))
+                        return
+                    }
                     val pendingCursor = database.getCollection<Document>("suggested_questions").find()
                     val pendingList = pendingCursor.toList().filter { it.get("isApproved") != true }
                     val mappedPending = pendingList.mapNotNull { doc ->
@@ -1356,6 +1191,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.APPROVE_QUESTION -> {
+            if (!isAdmin(msg.sender)) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν έχεις δικαιώματα διαχειριστή!"))))
+                return
+            }
             try {
                 val rawContent = msg.content ?: return
                 // Robust ID extraction: Look for a 24-character hex string anywhere in the content
@@ -1427,6 +1266,10 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.REJECT_QUESTION -> {
+            if (!isAdmin(msg.sender)) {
+                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Δεν έχεις δικαιώματα διαχειριστή!"))))
+                return
+            }
             try {
                 val rawContent = msg.content ?: return
                 val idMatch = Regex("[a-fA-F0-9]{24}").find(rawContent)
@@ -1467,40 +1310,62 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             if (targetRaw == "RANDOM") {
                 if (isLive) {
-                    // Redis-based Matchmaking
-                    try {
-                        redisPool.resource.use { r ->
-                            val queueKey = "matchmaking_queue_$gameType"
-                            val opponentName = r.lpop(queueKey)
-                            if (opponentName != null && opponentName != host && onlineUsers.containsKey(opponentName)) {
-                                val opponentSession = onlineUsers[opponentName]
-
-                                val duelId = "DUEL_${gameType}_${System.currentTimeMillis()}"
-                                val duelDoc = Document("_id", duelId)
-                                    .append("player1", host)
-                                    .append("player2", opponentName)
-                                    .append("status", "SETUP")
-                                    .append("isLive", true)
-                                    .append("p1_ready", false)
-                                    .append("p2_ready", false)
-                                    .append("isRandom", true)
-                                    .append("gameType", gameType)
-                                    .append("createdAt", Date())
-
-                                duelsColl.insertOne(duelDoc)
-
-                                val setupStr = "$duelId|$host|$opponentName|false|$gameType"
-                                val setupMsg = gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))
-                                session.send(Frame.Text(setupMsg))
-                                opponentSession?.send(Frame.Text(setupMsg))
-                            } else {
-                                r.rpush(queueKey, host)
-                                session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αναμονή για αντίπαλο ($gameType)..."))))
+                    var matchedOpponent: String? = null
+                    if (isRedisActive) {
+                        try {
+                            redisPool.resource.use { r ->
+                                val queueKey = "matchmaking_queue_$gameType"
+                                while (true) {
+                                    val candidate = r.lpop(queueKey) ?: break
+                                    if (candidate != host && onlineUsers.containsKey(candidate)) {
+                                        matchedOpponent = candidate
+                                        break
+                                    }
+                                }
+                                if (matchedOpponent == null) {
+                                    r.lrem(queueKey, 0, host)
+                                    r.rpush(queueKey, host)
+                                }
                             }
+                        } catch (e: Exception) {
+                            println("REDIS MATCHMAKING ERROR: ${e.message}. Falling back to local queue.")
+                            isRedisActive = false
                         }
-                    } catch (e: Exception) {
-                        println("REDIS MATCHMAKING ERROR: ${e.message}")
-                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Σφάλμα Matchmaking. Δοκίμασε πάλι."))))
+                    }
+
+                    if (!isRedisActive && matchedOpponent == null) {
+                        val candidateEntry = duelMatchmakingQueue.entries.firstOrNull { it.key != host && onlineUsers.containsKey(it.key) }
+                        if (candidateEntry != null) {
+                            duelMatchmakingQueue.remove(candidateEntry.key)
+                            matchedOpponent = candidateEntry.key
+                        } else {
+                            duelMatchmakingQueue[host] = session
+                        }
+                    }
+
+                    if (matchedOpponent != null) {
+                        val opponentName = matchedOpponent!!
+                        val opponentSession = onlineUsers[opponentName]
+                        val duelId = "DUEL_${gameType}_${System.currentTimeMillis()}"
+                        val duelDoc = Document("_id", duelId)
+                            .append("player1", host)
+                            .append("player2", opponentName)
+                            .append("status", "SETUP")
+                            .append("isLive", true)
+                            .append("p1_ready", false)
+                            .append("p2_ready", false)
+                            .append("isRandom", true)
+                            .append("gameType", gameType)
+                            .append("createdAt", Date())
+
+                        duelsColl.insertOne(duelDoc)
+
+                        val setupStr = "$duelId|$host|$opponentName|false|$gameType"
+                        val setupMsg = gson.toJson(GameMessage(MessageType.DUEL_SETUP, "Server", setupStr))
+                        session.send(Frame.Text(setupMsg))
+                        opponentSession?.send(Frame.Text(setupMsg))
+                    } else {
+                        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", "Αναμονή για αντίπαλο ($gameType)..."))))
                     }
                 } else {
                     // ASYNC Random Matchmaking (Trivia only for now)
@@ -1561,13 +1426,27 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.CANCEL_MATCHMAKING -> {
+            val user = canonicalName(usersColl, msg.sender.trim())
             duelMatchmakingQueue.remove(msg.sender)
-            println("SERVER: Matchmaking CANCELLED by ${msg.sender}")
+            duelMatchmakingQueue.remove(user)
+            val gameType = msg.content?.takeIf { it.isNotBlank() } ?: "TRIVIA"
+            if (isRedisActive) {
+                try {
+                    redisPool.resource.use { r ->
+                        r.lrem("matchmaking_queue_$gameType", 0, msg.sender)
+                        r.lrem("matchmaking_queue_$gameType", 0, user)
+                    }
+                } catch (e: Exception) {
+                    println("REDIS CANCEL MATCHMAKING ERROR: ${e.message}")
+                }
+            }
+            println("SERVER: Matchmaking CANCELLED by $user")
         }
 
         MessageType.DUEL_ACCEPT -> {
-            val acceptor = msg.sender
-            val host = msg.content?.split("|")?.getOrNull(0) ?: return
+            val acceptor = canonicalName(usersColl, msg.sender.trim())
+            val hostRaw = msg.content?.split("|")?.getOrNull(0) ?: return
+            val host = canonicalName(usersColl, hostRaw.trim())
 
             // Find the pending duel
             val duel = duelsColl.find(Filters.and(
@@ -1586,7 +1465,13 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             if (!isLive && p1Finished) {
                 // Async duel where P1 already finished -> launch game directly for P2 (acceptor)
                 val questionsList = duel.get("questions", List::class.java) as? List<Document> ?: emptyList()
-                val setupData = mapOf("timer" to 20, "questions" to gson.toJson(questionsList), "duelId" to duelId)
+                val setupData = mapOf(
+                    "timer" to 20,
+                    "questions" to gson.toJson(questionsList),
+                    "duelId" to duelId,
+                    "opponent" to host,
+                    "isAsync" to true
+                )
                 val startMsg = gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(setupData)))
                 session.send(Frame.Text(startMsg))
             } else {
@@ -1601,12 +1486,12 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val content = msg.content ?: return
             val parts = content.split("|")
             val duelId = parts.getOrNull(0) ?: return
-            val player = msg.sender
+            val player = canonicalName(usersColl, msg.sender.trim())
 
             val duel = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull() ?: return
             val gameType = duel.getString("gameType") ?: "TRIVIA"
 
-            val isP1 = player == duel.getString("player1")
+            val isP1 = player.equals(duel.getString("player1"), ignoreCase = true)
             val updateField = if (isP1) "p1_ready" else "p2_ready"
 
             val updates = mutableListOf(Updates.set(updateField, true))
@@ -1622,7 +1507,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         // Player 1 sets their 5 questions
                         updates.add(Updates.set("p1_questions", incomingQuestions.take(5)))
                         if (!isLive) {
-                            // Async P1: Only play P1's 5 questions in Phase 1 (1/5 to 5/5)
+                            // Async P1: Play 5 questions in Phase 1 (1/5 to 5/5)
                             updates.add(Updates.set("questions", incomingQuestions.take(5)))
                         }
                     } else {
@@ -1644,17 +1529,8 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             if (gameType == "TRIVIA") {
                 val isLive = updated.getBoolean("isLive") ?: false
-                
-                val questionsJson = if (!isLive && !isP1) {
-                    // Async P2: Play P2's 5 questions FIRST, followed immediately by P1's 5 questions!
-                    val p1Questions = updated.get("p1_questions", List::class.java) as? List<Document> ?: emptyList()
-                    val p2Questions = updated.get("p2_questions", List::class.java) as? List<Document> ?: emptyList()
-                    val p2TenQuestions = p2Questions.take(5) + p1Questions.take(5)
-                    gson.toJson(p2TenQuestions)
-                } else {
-                    val questionsList = updated.get("questions", List::class.java) as? List<Document> ?: emptyList()
-                    gson.toJson(questionsList)
-                }
+                val questionsList = updated.get("questions", List::class.java) as? List<Document> ?: emptyList()
+                val questionsJson = gson.toJson(questionsList)
 
                 val setupData = mapOf("timer" to 20, "questions" to questionsJson, "duelId" to duelId)
                 val startMsg = gson.toJson(GameMessage(MessageType.START_GAME, "Server", gson.toJson(setupData)))
@@ -1675,7 +1551,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
         }
 
         MessageType.DUEL_FINISH -> {
-            val sender = msg.sender
+            val sender = canonicalName(usersColl, msg.sender.trim())
             val stats = msg.content?.split("|") ?: return
             
             var duelIdParam: String? = null
@@ -1706,7 +1582,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
 
             val duel = duelsColl.find(duelFilter).firstOrNull() ?: return
             val duelId = duel.getString("_id")
-            if (sender == duel.getString("player1")) {
+            if (sender.equals(duel.getString("player1"), ignoreCase = true)) {
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_score", score), Updates.set("p1_time", time), Updates.set("p1_finished", true), Updates.set("gameType", gameType)))
 
                 // Notify Receiver for ASYNC duels AFTER sender finishes
@@ -1720,20 +1596,6 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                             targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_CHALLENGE_RECEIVED, "Server", challengeStr))))
                         } else {
                             pendingColl.insertOne(Document("target", target).append("type", "DUEL_CHALLENGE_RECEIVED").append("content", challengeStr))
-                        }
-
-                        // --- ASYNC TIMEOUT PROTECTION ---
-                        // If receiver doesn't finish in 24 hours, player1 wins by default
-                        CoroutineScope(Dispatchers.IO).launch {
-                            delay(86400000) // 24 hours
-                            val d = duelsColl.find(Filters.eq("_id", duelId)).firstOrNull()
-                            if (d != null && d.getString("status") == "SETUP" && d.getBoolean("p1_finished") == true && d.getBoolean("p2_finished") == false) {
-                                println("SERVER: Async Duel $duelId EXPIRED. Player 1 wins by default.")
-                                val p1 = d.getString("player1") ?: ""
-                                val p2 = d.getString("player2") ?: ""
-                                duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("status", "COMPLETED"), Updates.set("winner", p1)))
-                                updateDuelStats(database, p1, p2, p1, "TRIVIA")
-                            }
                         }
                     }
                 }
@@ -1768,7 +1630,11 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 recordMatchHistory(database, p1, p2, winner, gType)
                 updateDuelStats(database, p1, p2, winner, gType)
 
-                val resultMsg = "$winner|$p1|$s1|${10 - s1}|$p2|$s2|${10 - s2}"
+                val totalQuestions = (updated.get("questions", List::class.java)?.size)?.takeIf { it > 0 }
+                    ?: if (updated.getBoolean("isLive") == true) 10 else 5
+                val p1Wrong = (totalQuestions - s1).coerceAtLeast(0)
+                val p2Wrong = (totalQuestions - s2).coerceAtLeast(0)
+                val resultMsg = "$winner|$p1|$s1|$p1Wrong|$p2|$s2|$p2Wrong"
                 val resultFrame = Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_RESULT, "Server", resultMsg)))
 
                 val p1Session = onlineUsers[p1]
@@ -1990,27 +1856,34 @@ suspend fun sendFriendList(user: String, session: DefaultWebSocketServerSession)
     val friendsDoc = database.getCollection<Document>("friends").find(Filters.eq("_id", user)).firstOrNull()
     val friendsList = (friendsDoc?.get("friends") as? List<*>)?.map { it.toString() } ?: emptyList()
 
+    if (friendsList.isEmpty()) {
+        session.send(Frame.Text(gson.toJson(GameMessage(MessageType.FRIEND_LIST, "Server", "[]"))))
+        return
+    }
+
     val matchHistoryColl = database.getCollection<Document>("match_history")
+    val allMatches = matchHistoryColl.find(Filters.or(
+        Filters.and(Filters.eq("player1", user), Filters.`in`("player2", friendsList)),
+        Filters.and(Filters.`in`("player1", friendsList), Filters.eq("player2", user))
+    )).toList()
 
     val friends = friendsList.map { friendName -> 
-        // Calculate PvP stats against this specific friend
-        val historyList = matchHistoryColl.find(Filters.or(
-            Filters.and(Filters.eq("player1", user), Filters.eq("player2", friendName)),
-            Filters.and(Filters.eq("player1", friendName), Filters.eq("player2", user))
-        )).toList()
-        
         var wins = 0
         var losses = 0
         var draws = 0
         
-        historyList.forEach { match ->
-            val winner = match.getString("winner") ?: ""
-            if (winner == user) {
-                wins++
-            } else if (winner == friendName) {
-                losses++
-            } else if (winner.isBlank()) {
-                draws++
+        allMatches.forEach { match ->
+            val p1 = match.getString("player1")
+            val p2 = match.getString("player2")
+            if ((p1 == user && p2 == friendName) || (p1 == friendName && p2 == user)) {
+                val winner = match.getString("winner") ?: ""
+                if (winner == user) {
+                    wins++
+                } else if (winner == friendName) {
+                    losses++
+                } else if (winner.isBlank()) {
+                    draws++
+                }
             }
         }
         
