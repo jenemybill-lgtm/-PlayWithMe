@@ -1785,7 +1785,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 else -> database.getCollection<Document>("leaderboard_${gameType.lowercase()}")
             }
 
-            val userStats = statsColl.find(Filters.eq("_id", user)).firstOrNull()
+            val userStats = statsColl.find(Filters.or(Filters.eq("_id", user), Filters.eq("name", user))).firstOrNull()
             
             val historyFilter = if (gameType == null || gameType == "ALL") {
                 Filters.or(Filters.eq("player1", user), Filters.eq("player2", user))
