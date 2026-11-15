@@ -1809,10 +1809,17 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 Filters.regex("player2", userRegex, "i")
             )
 
-            val historyFilter = if (gameType == null || gameType == "ALL") {
-                userFilter
-            } else {
-                Filters.and(
+            val historyFilter = when {
+                gameType == null || gameType == "ALL" -> userFilter
+                gameType == "SOLO" || gameType == "SOLO_TRIVIA" -> Filters.and(
+                    Filters.or(Filters.eq("gameType", "SOLO"), Filters.eq("gameType", "SOLO_TRIVIA")),
+                    userFilter
+                )
+                gameType == "DUEL" || gameType == "TRIVIA" -> Filters.and(
+                    Filters.or(Filters.eq("gameType", "DUEL"), Filters.eq("gameType", "TRIVIA")),
+                    userFilter
+                )
+                else -> Filters.and(
                     Filters.eq("gameType", gameType),
                     userFilter
                 )
