@@ -1462,14 +1462,14 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
             val hostRaw = msg.content?.split("|")?.getOrNull(0) ?: return
             val host = canonicalName(usersColl, hostRaw.trim())
 
-            // Find the pending duel
+            // Find the latest pending duel between these two players
             val duel = duelsColl.find(Filters.and(
                 Filters.or(
                     Filters.and(Filters.eq("player1", host), Filters.eq("player2", acceptor)),
                     Filters.and(Filters.eq("player1", acceptor), Filters.eq("player2", host))
                 ),
                 Filters.eq("status", "SETUP")
-            )).firstOrNull() ?: return
+            )).sort(Sorts.descending("createdAt")).firstOrNull() ?: return
 
             val duelId = duel.getString("_id")
             val isLive = duel.getBoolean("isLive") ?: false
@@ -1594,7 +1594,7 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 )
             }
 
-            val duel = duelsColl.find(duelFilter).firstOrNull() ?: return
+            val duel = duelsColl.find(duelFilter).sort(Sorts.descending("createdAt")).firstOrNull() ?: return
             val duelId = duel.getString("_id")
             if (sender.equals(duel.getString("player1"), ignoreCase = true)) {
                 duelsColl.updateOne(Filters.eq("_id", duelId), Updates.combine(Updates.set("p1_score", score), Updates.set("p1_time", time), Updates.set("p1_finished", true), Updates.set("gameType", gameType)))
