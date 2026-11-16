@@ -1246,6 +1246,20 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                         }
                         targetColl.insertOne(approvedDoc)
                         println("SERVER: Question $cleanId APPROVED and moved to $category")
+
+                        // Reward the question creator (online or via pending_messages)
+                        val suggestedByRaw = questionDoc.getString("suggestedBy") ?: questionDoc.getString("suggested_by") ?: ""
+                        if (suggestedByRaw.isNotBlank()) {
+                            val author = canonicalName(usersColl, suggestedByRaw.trim())
+                            val preview = if (text.length > 40) "${text.take(40)}..." else text
+                            val rewardMsg = "QUESTION_APPROVED_REWARD|🎉 Η ερώτησή σου («$preview») εγκρίθηκε! Κέρδισες +100 Coins & +150 XP!"
+                            val authorSession = onlineUsers[author]
+                            if (authorSession != null) {
+                                authorSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.ERROR, "Server", rewardMsg))))
+                            } else {
+                                pendingColl.insertOne(Document("target", author).append("type", "ERROR").append("content", rewardMsg))
+                            }
+                        }
                     } else {
                         println("SERVER: Question $cleanId already exists in $category, just deleting from suggestions.")
                     }
