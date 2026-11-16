@@ -86,7 +86,7 @@ enum class MessageType {
     USE_POWERUP, POWERUP_EFFECT, PLAYER_STATS,
     DUEL_CHALLENGE, DUEL_CHALLENGE_RECEIVED, DUEL_ACCEPT, DUEL_SETUP, DUEL_START, DUEL_FINISH, DUEL_RESULT, DUEL_HISTORY_REQUEST, DUEL_HISTORY_DATA,
     REMOVE_FRIEND, ROOM_PLAYERS_UPDATE, CANCEL_MATCHMAKING, RESET_CHALLENGE_LIMIT, WAKE_UP, READY,
-    PVE_RESULT
+    PVE_RESULT, EMOTE
 }
 
 data class GameMessage(val type: MessageType, val sender: String, val content: String? = null)
@@ -1750,6 +1750,23 @@ suspend fun handleMessage(session: DefaultWebSocketServerSession, msg: GameMessa
                 "pending" to pendingDocs
             )
             session.send(Frame.Text(gson.toJson(GameMessage(MessageType.DUEL_HISTORY_DATA, "Server", gson.toJson(response)))))
+        }
+
+        MessageType.EMOTE -> {
+            val content = msg.content ?: return
+            if (content.contains("|")) {
+                val parts = content.split("|", limit = 2)
+                val targetUser = parts[0]
+                val emoji = parts[1]
+                onlineUsers[targetUser]?.let { targetSession ->
+                    try {
+                        targetSession.send(Frame.Text(gson.toJson(GameMessage(MessageType.EMOTE, msg.sender, emoji))))
+                    } catch (e: Exception) {}
+                }
+            } else {
+                val room = rooms.values.find { r -> r.players.any { it.name == msg.sender } || r.hostSession == session }
+                room?.broadcast(GameMessage(MessageType.EMOTE, msg.sender, content))
+            }
         }
 
         else -> {}
